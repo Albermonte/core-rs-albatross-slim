@@ -151,6 +151,7 @@ async fn main_inner() -> Result<(), Error> {
         sync_mode: None,
         network: None,
         prove: false,
+        version: false,
     };
 
     // Parse config file - this will obey the `--config` command line option.

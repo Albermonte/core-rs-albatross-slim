@@ -67,6 +67,10 @@ pub struct CommandLine {
     /// Internally used flag to start a zero-knowledge prover process.
     #[clap(long, action)]
     pub prove: bool,
+
+    /// Output the version of the client and exit immediately afterwards.
+    #[clap(long, short = 'v')]
+    pub version: bool,
 }
 
 impl CommandLine {

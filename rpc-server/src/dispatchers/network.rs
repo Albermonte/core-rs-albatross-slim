@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use nimiq_network_interface::network::Network as InterfaceNetwork;
 use nimiq_network_libp2p::Network;
 use nimiq_rpc_interface::{network::NetworkInterface, types::RPCResult};
+use nimiq_utils::CLIENT_VERSION;
 
 use crate::error::Error;
 
@@ -38,5 +39,9 @@ impl NetworkInterface for NetworkDispatcher {
             .map(|peer_id| peer_id.to_string())
             .collect::<Vec<_>>()
             .into())
+    }
+
+    async fn get_client_version(&self) -> RPCResult<String, (), Self::Error> {
+        Ok(String::from(CLIENT_VERSION).into())
     }
 }

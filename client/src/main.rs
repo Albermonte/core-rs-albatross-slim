@@ -15,7 +15,7 @@ pub use nimiq::{
     },
 };
 use nimiq_time::interval;
-use nimiq_utils::spawn;
+use nimiq_utils::{spawn, CLIENT_VERSION};
 
 async fn main_inner() -> Result<(), Error> {
     // Keep for potential future reactivation
@@ -38,6 +38,12 @@ async fn main_inner() -> Result<(), Error> {
             Some(&config_file.log)
         },
     )?;
+
+    // Simply log the Cargo package version a.k.a version of the client and return early
+    if command_line.version {
+        log::info!("Client version {}", CLIENT_VERSION);
+        return Ok(());
+    }
 
     // Initialize panic hook.
     initialize_panic_reporting();

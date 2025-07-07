@@ -15,4 +15,7 @@ pub trait NetworkInterface {
 
     /// Returns a list with the IDs of all our peers.
     async fn get_peer_list(&self) -> RPCResult<Vec<String>, (), Self::Error>;
+
+    /// Returns the version of the local client.
+    async fn get_client_version(&self) -> RPCResult<String, (), Self::Error>;
 }

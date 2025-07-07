@@ -28,3 +28,6 @@ mod waker;
 #[cfg(feature = "spawn")]
 pub use self::spawn::{spawn, spawn_local};
 pub use self::{sensitive::Sensitive, waker::WakerExt};
+
+/// The version of the client based on the Cargo workspace package
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
