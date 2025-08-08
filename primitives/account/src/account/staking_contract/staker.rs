@@ -286,9 +286,10 @@ impl StakingContract {
         store: &mut StakingContractStoreWrite,
         staker_address: &Address,
         value: Coin,
+        protocol_version: u16,
         tx_logger: &mut TransactionLog,
     ) -> Result<AddStakeReceipt, AccountError> {
-        if Policy::max_supported_version() < 2 {
+        if protocol_version < 2 {
             return self.legacy_add_stake(store, staker_address, value, tx_logger);
         }
         // Get the staker.
