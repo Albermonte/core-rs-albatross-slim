@@ -180,7 +180,7 @@ fn create_staker_works() {
     let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
     let accounts = Accounts::new(env.clone());
     let data_store = accounts.data_store(&Policy::STAKING_CONTRACT_ADDRESS);
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
     let mut db_txn = env.write_transaction();
     let mut db_txn = (&mut db_txn).into();
 
@@ -315,7 +315,7 @@ fn add_stake_works() {
     let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
     let accounts = Accounts::new(env.clone());
     let data_store = accounts.data_store(&Policy::STAKING_CONTRACT_ADDRESS);
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
     let mut db_txn = env.write_transaction();
     let mut db_txn = (&mut db_txn).into();
 
@@ -1437,6 +1437,7 @@ fn retire_stake_does_not_violate_jail_or_inactive_releases() {
     let block_state = BlockState {
         number: staker_setup.validator_state_release.unwrap() - 1,
         time: 1,
+        protocol_version: Policy::max_supported_version(),
     };
 
     let mut tx_logger = TransactionLog::empty();
@@ -1462,6 +1463,7 @@ fn retire_stake_does_not_violate_jail_or_inactive_releases() {
             &BlockState {
                 number: staker_setup.validator_state_release.unwrap(),
                 time: 1,
+                protocol_version: Policy::max_supported_version(),
             },
             data_store.write(&mut db_txn),
             &mut tx_logger,
@@ -1605,6 +1607,7 @@ fn cannot_retire_active_stake() {
     let block_state = BlockState::new(
         Policy::block_after_reporting_window(Policy::election_block_after(2)),
         2,
+        Policy::max_supported_version(),
     );
     let mut tx_logger = TransactionLog::empty();
     assert_eq!(
@@ -2540,6 +2543,7 @@ fn remove_stake_works() {
     let block_state = BlockState::new(
         Policy::block_after_reporting_window(Policy::election_block_after(2)),
         2,
+        Policy::max_supported_version(),
     );
     let tx = make_remove_stake_transaction(Policy::MINIMUM_STAKE * 2 + 1);
 
@@ -2573,6 +2577,7 @@ fn remove_stake_works() {
     let block_state = BlockState::new(
         Policy::block_after_reporting_window(Policy::election_block_after(2)),
         3,
+        Policy::max_supported_version(),
     );
 
     let mut tx_logger = TransactionLog::empty();
@@ -2924,7 +2929,11 @@ fn can_remove_stake_with_no_delegation() {
         .staking_contract
         .commit_incoming_transaction(
             &tx,
-            &BlockState::new(staker_setup.validator_state_release.unwrap(), 2),
+            &BlockState::new(
+                staker_setup.validator_state_release.unwrap(),
+                2,
+                Policy::max_supported_version(),
+            ),
             data_store.write(&mut db_txn),
             &mut TransactionLog::empty(),
         )
@@ -2974,7 +2983,7 @@ fn can_delegate_if_no_delegation_prior_delegation() {
     // Create a staker with no delegation
     let staker_keypair = ed25519_key_pair(STAKER_PRIVATE_KEY);
     let staker_address = staker_address();
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
 
     let tx = make_signed_incoming_transaction(
         IncomingStakingTransactionData::CreateStaker {
@@ -3001,7 +3010,7 @@ fn can_delegate_if_no_delegation_prior_delegation() {
     // Test execution:
     // -----------------------------------
     // Works when changing to a validator, despite active stake, because there is no prior delegation.
-    let block_state = BlockState::new(3, 3);
+    let block_state = BlockState::new(3, 3, Policy::max_supported_version());
     let tx = make_signed_incoming_transaction(
         IncomingStakingTransactionData::UpdateStaker {
             new_delegation: Some(validator_address.clone()),
@@ -3172,7 +3181,11 @@ fn can_only_redelegate_after_jail() {
         .staking_contract
         .commit_incoming_transaction(
             &tx,
-            &BlockState::new(staker_setup.validator_state_release.unwrap(), 1000),
+            &BlockState::new(
+                staker_setup.validator_state_release.unwrap(),
+                1000,
+                Policy::max_supported_version(),
+            ),
             data_store.write(&mut db_txn),
             &mut TransactionLog::empty(),
         )

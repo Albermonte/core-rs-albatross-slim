@@ -116,7 +116,8 @@ fn it_can_create_batch_finalization_inherents() {
             &[penalize_inherent],
             &BlockState::new(
                 Policy::blocks_per_batch() + 1 + Policy::genesis_block_number(),
-                1
+                1,
+                Policy::max_supported_version()
             ),
             &mut BlockLogger::empty()
         )
