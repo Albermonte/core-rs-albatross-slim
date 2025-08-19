@@ -162,6 +162,9 @@ impl Policy {
     /// A value of `80` means 80% of the stake needs to support the upgrade.
     pub const UPGRADE_MIN_SUPPORT: u64 = 80;
 
+    /// Add Stake contract upgrade.
+    pub const ADD_STAKE_PROTOCOL_UPGRADE_VERSION: u16 = 1;
+
     /// This function is used to determine if a validator signalled for a specific upgrade.
     /// This is checking the first two bytes of the signal data.
     /// However, the check could also be version specific in the future.
