@@ -208,11 +208,9 @@ impl Blockchain {
                 // Also, this works only if a single macro block is missing between history items.
                 let batch_number = Policy::batch_at(hist_tx.block_number);
                 if batch_number > prev_batch
-                    && block_state
-                        .last()
-                        .map_or(false, |block_state: &BlockState| {
-                            !Policy::is_macro_block_at(block_state.number)
-                        })
+                    && block_state.last().is_some_and(|block_state: &BlockState| {
+                        !Policy::is_macro_block_at(block_state.number)
+                    })
                 {
                     debug!(
                         history_item_block_number = hist_tx.block_number,
@@ -224,21 +222,19 @@ impl Blockchain {
                     );
                     assert_eq!(batch_number, prev_batch + 1, "Missing batch");
 
-                    // We only allow protocol version upgrades on election blocks, so the version cannot be change here.
                     block_state.push(BlockState {
                         number: Policy::macro_block_of(prev_batch).unwrap(),
-                        time: 0, // FIXME
-                        protocol_version: this.state.current_version(),
+                        time: 0,                                        // FIXME
+                        protocol_version: this.state.current_version(), // Cannot change, protocol version upgrades only on election blocks.
                     });
                     block_transactions.push(vec![]);
                     block_inherents.push(vec![]);
                 }
 
-                // We only allow protocol version upgrades on election blocks, so the version cannot be change here.
                 block_state.push(BlockState {
                     number: hist_tx.block_number,
                     time: hist_tx.block_time,
-                    protocol_version: this.state.current_version(),
+                    protocol_version: this.state.current_version(), // Cannot change, protocol version upgrades only on election blocks.
                 });
                 block_transactions.push(vec![]);
                 block_inherents.push(vec![]);

@@ -155,7 +155,7 @@ fn it_can_de_serialize_a_staking_contract() {
 
 #[test]
 fn can_get_validator() {
-    let validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let validator_setup = ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -315,7 +315,8 @@ fn update_validator_works() {
     // Test setup:
     // -----------------------------------
     let mut rng = test_rng(false);
-    let mut validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let mut validator_setup =
+        ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -485,7 +486,8 @@ fn deactivate_validator_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let mut validator_setup =
+        ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -667,7 +669,8 @@ fn retire_validator_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let mut validator_setup =
+        ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -820,7 +823,8 @@ fn delete_validator_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let mut validator_setup =
+        ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -1538,7 +1542,8 @@ fn reactivate_jail_interaction() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -1585,7 +1590,8 @@ fn deactivate_jail_interaction() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -1632,7 +1638,8 @@ fn delete_jail_interaction() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -1897,7 +1904,8 @@ fn can_jail_twice() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2003,7 +2011,8 @@ fn can_retire_jailed_validator() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2530,7 +2539,8 @@ fn jail_and_penalize_and_revert_twice() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2632,7 +2642,8 @@ fn can_reserve_and_release_balance() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let retired_setup = ValidatorSetup::setup_retired_validator(None);
+    let retired_setup =
+        ValidatorSetup::setup_retired_validator(None, Policy::max_supported_version());
     let data_store = retired_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2707,7 +2718,8 @@ fn cannot_reserve_balance_if_value_different_than_validator_deposit() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let retired_setup = ValidatorSetup::setup_retired_validator(None);
+    let retired_setup =
+        ValidatorSetup::setup_retired_validator(None, Policy::max_supported_version());
     let data_store = retired_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2754,7 +2766,8 @@ fn cannot_reserve_balance_if_not_released() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let retired_setup = ValidatorSetup::setup_retired_validator(None);
+    let retired_setup =
+        ValidatorSetup::setup_retired_validator(None, Policy::max_supported_version());
     let data_store = retired_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2798,7 +2811,8 @@ fn cannot_reserve_balance_if_jailed() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_retired_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_retired_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_retired_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -2861,7 +2875,8 @@ fn commit_failed_delete_validator_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut validator_setup = ValidatorSetup::new(Some(150_000_000));
+    let mut validator_setup =
+        ValidatorSetup::new(Some(150_000_000), Policy::max_supported_version());
     let data_store = validator_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
@@ -3212,7 +3227,8 @@ fn commit_failed_delete_validator_does_not_work_if_jailed() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut jailed_retired_setup = ValidatorSetup::setup_jailed_validator(None);
+    let mut jailed_retired_setup =
+        ValidatorSetup::setup_jailed_validator(None, Policy::max_supported_version());
     let data_store = jailed_retired_setup
         .accounts
         .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
