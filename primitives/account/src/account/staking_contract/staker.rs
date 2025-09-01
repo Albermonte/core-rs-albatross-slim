@@ -296,6 +296,11 @@ impl StakingContract {
         // Get the staker.
         let mut staker = store.expect_staker(staker_address)?;
 
+        // Check that the delegation is still valid, i.e. the validator hasn't been deleted.
+        if let Some(validator_address) = &staker.delegation {
+            store.expect_validator(validator_address)?;
+        }
+
         // Add stake txs never violate minimum stake for the non-retired funds (invariant 1),
         // because the intrinsic tx checks that value is >= min stake.
         assert!(
@@ -330,11 +335,9 @@ impl StakingContract {
             credited_balance: credited_balance.clone(),
         };
 
+        // If we are actively delegating to a validator, we need to update it.
         if credited_balance == BalanceType::Active {
-            // If we are delegating to a validator, we need to update it.
             if let Some(validator_address) = &staker.delegation {
-                // Check that the delegation is still valid, i.e. the validator hasn't been deleted.
-                store.expect_validator(validator_address)?;
                 self.increase_stake_to_validator(store, validator_address, value);
             }
         }

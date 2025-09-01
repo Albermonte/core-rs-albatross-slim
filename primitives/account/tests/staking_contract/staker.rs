@@ -11,7 +11,7 @@ use nimiq_trie::WriteTransactionProxy;
 
 use super::*;
 
-fn make_retire_stake_transaction(value: u64) -> Transaction {
+pub(crate) fn make_retire_stake_transaction(value: u64) -> Transaction {
     let private_key =
         PrivateKey::deserialize_from_vec(&hex::decode(STAKER_PRIVATE_KEY).unwrap()).unwrap();
 
@@ -26,7 +26,7 @@ fn make_retire_stake_transaction(value: u64) -> Transaction {
     )
 }
 
-fn make_activate_stake_transaction(value: u64) -> Transaction {
+pub(crate) fn make_activate_stake_transaction(value: u64) -> Transaction {
     let private_key =
         PrivateKey::deserialize_from_vec(&hex::decode(STAKER_PRIVATE_KEY).unwrap()).unwrap();
 
@@ -41,7 +41,7 @@ fn make_activate_stake_transaction(value: u64) -> Transaction {
     )
 }
 
-fn make_remove_stake_transaction(value: u64) -> Transaction {
+pub(crate) fn make_remove_stake_transaction(value: u64) -> Transaction {
     make_remove_stake_transaction_with_fee(value - 100, 100)
 }
 
@@ -70,11 +70,12 @@ fn make_remove_stake_transaction_with_fee(value: u64, fee: u64) -> Transaction {
     tx
 }
 
-fn prepare_second_validator_for_redelegation(
+pub(crate) fn prepare_second_validator_for_redelegation(
     validator_state: ValidatorState,
     active_stake: u64,
     inactive_stake: u64,
     retired_stake: u64,
+    auto_reactivate: bool,
 ) -> (StakerSetup, Address, Transaction) {
     // -----------------------------------
     // Test setup:
@@ -123,7 +124,7 @@ fn prepare_second_validator_for_redelegation(
     let tx = make_signed_incoming_transaction(
         IncomingStakingTransactionData::UpdateStaker {
             new_delegation: Some(validator_address2.clone()),
-            reactivate_all_stake: false,
+            reactivate_all_stake: auto_reactivate,
             proof: SignatureProof::default(),
         },
         0,
@@ -994,6 +995,7 @@ fn update_staker_works() {
         0,
         150_000_000,
         100_000_000,
+        false,
     );
 
     let data_store = staker_setup
@@ -1717,7 +1719,7 @@ fn update_staker_same_validator() {
     // -----------------------------------
     // Test execution:
     // -----------------------------------
-    // Works when changing to no validator.
+    // Works when changing to the same validator.
     let block_state = staker_setup.release_block_state.clone();
     let tx = make_signed_incoming_transaction(
         IncomingStakingTransactionData::UpdateStaker {
@@ -2093,87 +2095,6 @@ fn remove_stake_works() {
     );
 }
 
-#[test]
-fn remove_stake_from_tombstone_works() {
-    // -----------------------------------
-    // Test setup:
-    // -----------------------------------
-    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance(
-        ValidatorState::Deleted,
-        0,
-        0,
-        150_000_000,
-        Policy::max_supported_version(),
-    );
-    let data_store = staker_setup
-        .accounts
-        .data_store(&Policy::STAKING_CONTRACT_ADDRESS);
-    let mut db_txn = staker_setup.env.write_transaction();
-    let mut db_txn: WriteTransactionProxy = (&mut db_txn).into();
-
-    let staker_address = staker_setup.staker_address;
-    let validator_address = staker_setup.validator_address;
-
-    // -----------------------------------
-    // Test execution:
-    // -----------------------------------
-    // Remove the staker.
-    let remove_stake_tx = make_remove_stake_transaction(150_000_000);
-    let remove_stake_block_state = staker_setup.release_block_state;
-
-    let remove_stake_receipt = staker_setup
-        .staking_contract
-        .commit_outgoing_transaction(
-            &remove_stake_tx,
-            &remove_stake_block_state,
-            data_store.write(&mut db_txn),
-            &mut TransactionLog::empty(),
-        )
-        .expect("Failed to commit transaction");
-
-    let expected_receipt = DeleteStakerReceipt {
-        delegation: Some(validator_address.clone()),
-    };
-    assert_eq!(remove_stake_receipt, Some(expected_receipt.into()));
-
-    assert_eq!(
-        staker_setup
-            .staking_contract
-            .get_staker(&data_store.read(&db_txn), &staker_address),
-        None
-    );
-    assert_eq!(
-        staker_setup
-            .staking_contract
-            .get_tombstone(&data_store.read(&db_txn), &validator_address),
-        None
-    );
-
-    assert_eq!(staker_setup.staking_contract.balance, Coin::ZERO);
-
-    // Revert the remove stake transaction.
-    staker_setup
-        .staking_contract
-        .revert_outgoing_transaction(
-            &remove_stake_tx,
-            &remove_stake_block_state,
-            remove_stake_receipt,
-            data_store.write(&mut db_txn),
-            &mut TransactionLog::empty(),
-        )
-        .expect("Failed to revert transaction");
-
-    assert_eq!(
-        staker_setup
-            .staking_contract
-            .get_tombstone(&data_store.read(&db_txn), &validator_address),
-        Some(Tombstone {
-            remaining_stake: Coin::ZERO,
-            num_remaining_stakers: 1
-        })
-    );
-}
-
 /// Staker can only remove stake from retired balance
 #[test]
 fn can_only_remove_retired_balance() {
@@ -2279,6 +2200,7 @@ fn can_remove_stake_with_no_delegation() {
         0,
         100_000_000,
         50_000_000,
+        false,
     );
 
     let data_store = staker_setup
@@ -2520,6 +2442,7 @@ fn can_only_redelegate_after_jail() {
         0,
         50_000_000,
         10_000_000,
+        false,
     );
 
     let data_store = staker_setup
@@ -2569,6 +2492,7 @@ fn can_only_redelegate_after_release() {
         0,
         50_000_000,
         10_000_000,
+        false,
     );
 
     let data_store = staker_setup
@@ -2614,6 +2538,7 @@ fn cannot_redelegate_while_having_active_stake() {
         50_000_000,
         50_000_000,
         10_000_000,
+        false,
     );
 
     let data_store = staker_setup

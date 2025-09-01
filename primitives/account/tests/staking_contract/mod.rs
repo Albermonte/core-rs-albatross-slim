@@ -19,9 +19,10 @@ use nimiq_transaction::{
     SignatureProof, Transaction,
 };
 
-mod add_stake_policy;
 mod punished_slots;
 mod staker;
+mod staker_add_stake_policy;
+mod staker_tombstone_interaction;
 mod validator;
 
 const VALIDATOR_ADDRESS: &str = "83fa05dbe31f85e719f4c4fd67ebdba2e444d9f8";
