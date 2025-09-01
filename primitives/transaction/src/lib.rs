@@ -331,15 +331,23 @@ impl Transaction {
         TransactionFormat::Extended
     }
 
-    pub fn verify_mut(&mut self, network_id: NetworkId) -> Result<(), TransactionError> {
-        let ret = self.verify(network_id);
+    pub fn verify_mut(
+        &mut self,
+        network_id: NetworkId,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
+        let ret = self.verify(network_id, protocol_version);
         if ret.is_ok() {
             self.valid = true;
         }
         ret
     }
 
-    pub fn verify(&self, network_id: NetworkId) -> Result<(), TransactionError> {
+    pub fn verify(
+        &self,
+        network_id: NetworkId,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         if self.valid {
             return Ok(());
         }
@@ -375,7 +383,7 @@ impl Transaction {
         AccountType::verify_outgoing_transaction(self)?;
 
         // Check transaction validity for recipient account.
-        AccountType::verify_incoming_transaction(self)?;
+        AccountType::verify_incoming_transaction(self, protocol_version)?;
 
         Ok(())
     }

@@ -666,7 +666,7 @@ mod test {
 
             let web_transaction: WebTransaction = pos_transaction.into();
             // Convert with the genesis block number and timestamp of mainnet.
-            web_transaction.to_plain_transaction(Some(3456000), Some(1732034720000));
+            web_transaction.to_plain_transaction(Some(3456000), Some(1732034720000), 0);
         }
     }
 }

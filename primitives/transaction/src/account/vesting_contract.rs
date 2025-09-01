@@ -11,7 +11,10 @@ use crate::{
 pub struct VestingContractVerifier;
 
 impl AccountTransactionVerification for VestingContractVerifier {
-    fn verify_incoming_transaction(transaction: &Transaction) -> Result<(), TransactionError> {
+    fn verify_incoming_transaction(
+        transaction: &Transaction,
+        _protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         assert_eq!(transaction.recipient_type, AccountType::Vesting);
 
         if !transaction

@@ -105,7 +105,11 @@ impl IncomingStakingTransactionData {
         Ok(Self::deserialize_all(&transaction.recipient_data)?)
     }
 
-    pub fn verify(&self, transaction: &Transaction) -> Result<(), TransactionError> {
+    pub fn verify(
+        &self,
+        transaction: &Transaction,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         match self {
             IncomingStakingTransactionData::CreateValidator {
                 voting_key,
@@ -166,8 +170,8 @@ impl IncomingStakingTransactionData {
                 verify_transaction_signature(transaction, proof)?
             }
             IncomingStakingTransactionData::CreateStaker { proof, .. } => {
-                // Check that stake is at least minimum stake.
                 if transaction.value < Coin::from_u64_unchecked(Policy::MINIMUM_STAKE) {
+                    // Check that stake is at least minimum stake.
                     warn!("Can't create a staker with less than minimum stake. The offending transaction is the following:\n{:?}", transaction);
                     return Err(TransactionError::InvalidValue);
                 }
@@ -176,8 +180,15 @@ impl IncomingStakingTransactionData {
                 verify_transaction_signature(transaction, proof)?
             }
             IncomingStakingTransactionData::AddStake { .. } => {
-                // Adding stake should be greater than 0.
-                if transaction.value < Coin::from_u64_unchecked(Policy::MINIMUM_STAKE) {
+                // Before upgrade, the add stake should be at least greater than 0.
+                if transaction.value.is_zero() {
+                    warn!("Add stake transactions must have positive value. The offending transaction is the following:\n{:?}", transaction);
+                    return Err(TransactionError::ZeroValue);
+                }
+                // After upgrade, the minimum required for this operations is Minimum Stake.
+                if protocol_version >= Policy::ADD_STAKE_PROTOCOL_UPGRADE_VERSION
+                    && transaction.value < Coin::from_u64_unchecked(Policy::MINIMUM_STAKE)
+                {
                     warn!("Add stake must increment stake by at least minimum stake. The offending transaction is the following:\n{:?}", transaction);
                     return Err(TransactionError::InvalidValue);
                 }

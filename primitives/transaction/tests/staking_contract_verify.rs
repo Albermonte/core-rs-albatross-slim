@@ -56,7 +56,11 @@ fn it_does_not_support_contract_creation() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
+        AccountType::verify_incoming_transaction(&transaction, 0),
+        Err(TransactionError::InvalidForRecipient)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&transaction, Policy::max_supported_version()),
         Err(TransactionError::InvalidForRecipient)
     );
 }
@@ -106,20 +110,32 @@ fn create_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Deposit too small or too big.
     tx.value = Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT - 100);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
     tx.value = Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT + 100);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, 0),
         Err(TransactionError::InvalidValue)
     );
 
@@ -142,7 +158,11 @@ fn create_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidData)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidData)
     );
 
@@ -166,7 +186,11 @@ fn create_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -216,13 +240,21 @@ fn update_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -242,7 +274,11 @@ fn update_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidData)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidData)
     );
 
@@ -265,7 +301,11 @@ fn update_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidData)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidData)
     );
 
@@ -291,7 +331,11 @@ fn update_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -324,13 +368,21 @@ fn deactivate_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -348,7 +400,11 @@ fn deactivate_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -381,13 +437,21 @@ fn reactivate_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -405,7 +469,11 @@ fn reactivate_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -437,13 +505,21 @@ fn retire_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -460,7 +536,11 @@ fn retire_validator() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -493,13 +573,20 @@ fn create_staker() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
-
-    // Deposit too small.
-    tx.value = Coin::from_u64_unchecked(Policy::MINIMUM_STAKE - 1);
-
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
+
+    // Deposit too small (post upgrade restriction).
+    tx.value = Coin::from_u64_unchecked(Policy::MINIMUM_STAKE - 1);
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -517,7 +604,11 @@ fn create_staker() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -527,7 +618,7 @@ fn stake() {
     let keypair = ed25519_key_pair(STAKER_PRIVATE_KEY);
 
     // Test serialization and deserialization.
-    let tx = make_signed_incoming_tx(
+    let mut tx = make_signed_incoming_tx(
         IncomingStakingTransactionData::AddStake {
             staker_address: STAKER_ADDRESS.parse().unwrap(),
         },
@@ -548,7 +639,30 @@ fn stake() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
+
+    // Deposit as zero (pre upgrade restriction).
+    tx.value = Coin::ZERO;
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::ZeroValue)
+    );
+    assert_eq!(
+        Err(TransactionError::ZeroValue),
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+    );
+
+    // Deposit too small (post upgrade restriction).
+    tx.value = Coin::from_u64_unchecked(Policy::MINIMUM_STAKE - 1);
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Err(TransactionError::InvalidValue)
+    );
 }
 
 #[test]
@@ -580,13 +694,21 @@ fn update_staker() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    assert_eq!(AccountType::verify_incoming_transaction(&tx, 0), Ok(()));
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
+        Ok(())
+    );
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidValue)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -605,7 +727,11 @@ fn update_staker() {
     );
 
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidProof)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, Policy::max_supported_version()),
         Err(TransactionError::InvalidProof)
     );
 }

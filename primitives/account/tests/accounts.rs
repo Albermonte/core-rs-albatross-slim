@@ -987,7 +987,11 @@ fn can_revert_transactions() {
                         fail_recipient,
                         "Testing transaction"
                     );
-                    assert_eq!(tx.verify(NetworkId::UnitAlbatross), Ok(()));
+                    assert_eq!(tx.verify(NetworkId::UnitAlbatross, 0), Ok(()));
+                    assert_eq!(
+                        tx.verify(NetworkId::UnitAlbatross, Policy::max_supported_version()),
+                        Ok(())
+                    );
 
                     let receipts = accounts.test(&[tx], &[], &block_state);
                     if fail_sender || fail_recipient {

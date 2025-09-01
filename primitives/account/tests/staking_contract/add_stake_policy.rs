@@ -590,8 +590,9 @@ fn add_stake_enforces_minimum_stake_works() {
         Policy::MINIMUM_STAKE - 1,
         &staker_keypair,
     );
+    assert_eq!(tx.verify(NetworkId::UnitAlbatross, 0), Ok(()));
     assert_eq!(
-        tx.verify(NetworkId::UnitAlbatross),
+        tx.verify(NetworkId::UnitAlbatross, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 
@@ -835,8 +836,9 @@ fn add_stake_enforces_minimum_stake_legacy_works() {
         Policy::MINIMUM_STAKE - 1,
         &staker_keypair,
     );
+    assert_eq!(tx.verify(NetworkId::UnitAlbatross, 0), Ok(()));
     assert_eq!(
-        tx.verify(NetworkId::UnitAlbatross),
+        tx.verify(NetworkId::UnitAlbatross, Policy::max_supported_version()),
         Err(TransactionError::InvalidValue)
     );
 

@@ -559,7 +559,8 @@ impl Client {
         &self,
         tx: Transaction,
     ) -> Result<PlainTransactionDetails, JsError> {
-        tx.verify(Some(self.network_id))?;
+        let protocol_version = self.inner.protocol_version();
+        tx.verify(Some(self.network_id), protocol_version)?;
 
         // Check if we are already subscribed to the sender or recipient
         let already_subscribed = self
@@ -648,8 +649,15 @@ impl Client {
             Ok(details)
         } else {
             // If the transaction did not get included, return it as `TransactionState::New`
-            let details =
-                PlainTransactionDetails::new(&tx, TransactionState::New, None, None, None, None);
+            let details = PlainTransactionDetails::new(
+                &tx,
+                TransactionState::New,
+                None,
+                None,
+                None,
+                None,
+                protocol_version,
+            );
             Ok(details)
         }
     }
@@ -686,6 +694,7 @@ impl Client {
                     self.inner.blockchain_head().block_number(),
                     genesis.as_ref().map(|block| block.block_number()),
                     genesis.as_ref().map(|block| block.timestamp()),
+                    self.inner.protocol_version(),
                 )
                 .expect("no non-reward inherent")
             })
@@ -900,6 +909,7 @@ impl Client {
                     current_height,
                     genesis.as_ref().map(|block| block.block_number()),
                     genesis.as_ref().map(|block| block.timestamp()),
+                    self.inner.protocol_version(),
                 )
                 .expect("no non-reward inherent")
             })
@@ -1285,6 +1295,7 @@ impl Client {
                             // but we'll only get PoS transactions here from the event stream.
                             None,
                             None,
+                            consensus.blockchain.read().protocol_version(),
                         )
                         .expect("no non-reward inherent");
 

@@ -12,7 +12,10 @@ pub mod structs;
 pub struct StakingContractVerifier {}
 
 impl AccountTransactionVerification for StakingContractVerifier {
-    fn verify_incoming_transaction(transaction: &Transaction) -> Result<(), TransactionError> {
+    fn verify_incoming_transaction(
+        transaction: &Transaction,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         assert_eq!(transaction.recipient_type, AccountType::Staking);
 
         if transaction
@@ -40,7 +43,7 @@ impl AccountTransactionVerification for StakingContractVerifier {
             return Err(TransactionError::InvalidValue);
         }
 
-        data.verify(transaction)?;
+        data.verify(transaction, protocol_version)?;
 
         Ok(())
     }

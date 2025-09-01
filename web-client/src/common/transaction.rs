@@ -219,13 +219,15 @@ impl Transaction {
     /// **Throws with any transaction validity error.** Returns without exception if the transaction is valid.
     ///
     /// Throws when the given networkId is unknown.
-    pub fn verify(&self, network_id: Option<u8>) -> Result<(), JsError> {
+    pub fn verify(&self, network_id: Option<u8>, protocol_version: u16) -> Result<(), JsError> {
         let network_id = match network_id {
             Some(id) => to_network_id(id)?,
             None => self.inner.network_id,
         };
 
-        self.inner.verify(network_id).map_err(JsError::from)
+        self.inner
+            .verify(network_id, protocol_version)
+            .map_err(JsError::from)
     }
 
     /// Tests if the transaction is valid at the specified block height.
@@ -365,8 +367,10 @@ impl Transaction {
         &self,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
+        protocol_version: u16,
     ) -> Result<PlainTransactionType, JsError> {
-        let plain = self.to_plain_transaction(genesis_block_number, genesis_timestamp);
+        let plain =
+            self.to_plain_transaction(genesis_block_number, genesis_timestamp, protocol_version);
         Ok(serde_wasm_bindgen::to_value(&plain)?.into())
     }
 
@@ -442,6 +446,7 @@ impl Transaction {
         &self,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
+        protocol_version: u16,
     ) -> PlainTransaction {
         PlainTransaction {
             transaction_hash: self.hash(),
@@ -530,7 +535,7 @@ impl Transaction {
                 }
             },
             size: self.serialized_size(),
-            valid: self.verify(None).is_ok(),
+            valid: self.verify(None, protocol_version).is_ok(),
         }
     }
 
@@ -845,7 +850,7 @@ pub struct PlainTransaction {
     /// Basic transactions are simple value transfers between two regular address types and cannot contain
     /// any extra data. Basic transactions can be serialized to less bytes, so take up less place on the
     /// blockchain. Extended transactions on the other hand are all other transactions: contract creations
-    /// and interactions, staking transactions, transactions with exta data, etc.
+    /// and interactions, staking transactions, transactions with extra data, etc.
     #[tsify(type = "\"basic\" | \"extended\"")]
     pub format: TransactionFormat,
     /// The transaction's sender address in human-readable IBAN format.
@@ -1027,9 +1032,10 @@ impl PlainTransactionDetails {
         block_height: Option<u32>,
         timestamp: Option<u64>,
         confirmations: Option<u32>,
+        protocol_version: u16,
     ) -> Self {
         Self {
-            transaction: tx.to_plain_transaction(None, None),
+            transaction: tx.to_plain_transaction(None, None, protocol_version),
             state,
             execution_result,
             block_height,
@@ -1037,12 +1043,14 @@ impl PlainTransactionDetails {
             confirmations,
         }
     }
+
     /// Creates a PlainTransactionDetails struct that can be serialized to JS from a native [HistoricTransaction].
     pub fn try_from_historic_transaction(
         hist_tx: HistoricTransaction,
         current_block: u32,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
+        protocol_version: u16,
     ) -> Option<PlainTransactionDetails> {
         let block_number = hist_tx.block_number;
         let block_time = hist_tx.block_time;
@@ -1056,13 +1064,19 @@ impl PlainTransactionDetails {
         let (succeeded, transaction) = match hist_tx.data {
             HistoricTransactionData::Basic(ExecutedTransaction::Ok(inner)) => (
                 true,
-                Transaction::from(inner)
-                    .to_plain_transaction(genesis_block_number, genesis_timestamp),
+                Transaction::from(inner).to_plain_transaction(
+                    genesis_block_number,
+                    genesis_timestamp,
+                    protocol_version,
+                ),
             ),
             HistoricTransactionData::Basic(ExecutedTransaction::Err(inner)) => (
                 false,
-                Transaction::from(inner)
-                    .to_plain_transaction(genesis_block_number, genesis_timestamp),
+                Transaction::from(inner).to_plain_transaction(
+                    genesis_block_number,
+                    genesis_timestamp,
+                    protocol_version,
+                ),
             ),
             HistoricTransactionData::Reward(ref ev) => (
                 true,
