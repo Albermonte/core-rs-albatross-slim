@@ -265,6 +265,115 @@ fn history_sync_works() {
     );
 }
 
+#[test]
+fn history_sync_works_for_first_epoch() {
+    let genesis_block_number = Policy::genesis_block_number();
+    // The minimum number of macro blocks necessary so that we have two election blocks and a few
+    // checkpoint blocks to push.
+    let num_macro_blocks = Policy::batches_per_epoch() as usize;
+
+    // Create a blockchain to produce the macro blocks.
+    let time = Arc::new(OffsetTime::new());
+    let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
+    let blockchain = Arc::new(RwLock::new(
+        Blockchain::new(
+            env,
+            BlockchainConfig::default(),
+            NetworkId::UnitAlbatross,
+            time,
+        )
+        .unwrap(),
+    ));
+
+    // Create a second blockchain to push blocks to.
+    let time = Arc::new(OffsetTime::new());
+    let env2 = MdbxDatabase::new_volatile(Default::default()).unwrap();
+    let blockchain2 = Arc::new(RwLock::new(
+        Blockchain::new(
+            env2,
+            BlockchainConfig::default(),
+            NetworkId::UnitAlbatross,
+            time,
+        )
+        .unwrap(),
+    ));
+
+    // Create a third blockchain to push blocks to.
+    let time = Arc::new(OffsetTime::new());
+    let env3 = MdbxDatabase::new_volatile(Default::default()).unwrap();
+    let blockchain3 = Arc::new(RwLock::new(
+        Blockchain::new(
+            env3,
+            BlockchainConfig::default(),
+            NetworkId::UnitAlbatross,
+            time,
+        )
+        .unwrap(),
+    ));
+
+    // Produce the blocks on blockchain1.
+    let producer = BlockProducer::new(signing_key(), voting_key());
+    produce_macro_blocks(&producer, &blockchain, num_macro_blocks);
+
+    // Get the checkpoint blocks and corresponding history tree transactions.
+    let blockchain_rg = blockchain.read();
+
+    // Get the first election block and corresponding history tree transactions.
+    let election_txs_1 = blockchain_rg.history_store.get_epoch_transactions(1, None);
+    let election_block_1 = blockchain_rg
+        .chain_store
+        .get_block_at(
+            Policy::blocks_per_epoch() + genesis_block_number,
+            true,
+            None,
+        )
+        .unwrap();
+
+    let checkpoint_block_1_2 = blockchain_rg
+        .chain_store
+        .get_block_at(
+            Policy::blocks_per_batch() * 2 + genesis_block_number,
+            true,
+            None,
+        )
+        .unwrap();
+    let mut checkpoint_txs_1_2 = vec![];
+
+    for hist_tx in &election_txs_1 {
+        if hist_tx.block_number > Policy::blocks_per_batch() * 2 + genesis_block_number {
+            break;
+        }
+        checkpoint_txs_1_2.push(hist_tx.clone());
+    }
+
+    // Sync the first checkpoint to make sure it works
+    assert_eq!(
+        Blockchain::push_history_sync(
+            blockchain2.upgradable_read(),
+            checkpoint_block_1_2,
+            &checkpoint_txs_1_2
+        ),
+        Ok(PushResult::Extended)
+    );
+    assert_eq!(
+        Blockchain::push_history_sync(
+            blockchain2.upgradable_read(),
+            election_block_1.clone(),
+            &election_txs_1
+        ),
+        Ok(PushResult::Extended)
+    );
+    // Sync directly the whole first epoch
+    assert_eq!(
+        Blockchain::push_history_sync(
+            blockchain3.upgradable_read(),
+            election_block_1,
+            &election_txs_1
+        ),
+        Ok(PushResult::Extended)
+    );
+}
+
 // Tests if the history sync works when micro blocks have already been pushed in the blockchain.
 // This basically tests if we can go from the history sync to the normal follow mode and back.
 #[test]
