@@ -321,12 +321,12 @@ impl StakingContract {
         let credited_balance = if !staker.active_balance.is_zero() {
             staker.active_balance += value;
             BalanceType::Active
-        } else if staker.inactive_balance >= staker.retired_balance {
-            staker.inactive_balance += value;
-            BalanceType::Inactive
         } else {
-            staker.retired_balance += value;
-            BalanceType::Retired
+            staker.inactive_balance += value;
+            if staker.inactive_from.is_none() {
+                staker.inactive_from = Some(0);
+            }
+            BalanceType::Inactive
         };
         self.balance += value;
 
@@ -383,6 +383,9 @@ impl StakingContract {
             }
             BalanceType::Inactive => {
                 staker.inactive_balance -= value;
+                if staker.inactive_balance.is_zero() {
+                    staker.inactive_from = None;
+                }
             }
             BalanceType::Retired => {
                 staker.retired_balance -= value;
@@ -1068,7 +1071,7 @@ impl StakingContract {
         panic!("inconsistent contract state");
     }
 
-    // Pre version upgrade.
+    // Pre protocol upgrade.
     // IMPORTANT: DO NOT REMOVE THIS CODE!
     // It is needed for history nodes to sync.
 
