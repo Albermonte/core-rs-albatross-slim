@@ -291,7 +291,7 @@ impl StakingContract {
     ) -> Result<AddStakeReceipt, AccountError> {
         if protocol_version < Policy::ADD_STAKE_PROTOCOL_UPGRADE_VERSION {
             log::warn!(%protocol_version, "Adding stake using old protocol version");
-            return self.legacy_add_stake(store, staker_address, value, tx_logger);
+            return self.legacy_add_stake_0v(store, staker_address, value, tx_logger);
         }
         // Get the staker.
         let mut staker = store.expect_staker(staker_address)?;
@@ -1078,7 +1078,7 @@ impl StakingContract {
     /// Legacy add stake logic, it adds more Coins to a staker's active balance.
     /// It will be directly added to the staker's balance.
     /// Anyone can add stake for a staker. The staker must already exist.
-    pub fn legacy_add_stake(
+    pub fn legacy_add_stake_0v(
         &mut self,
         store: &mut StakingContractStoreWrite,
         staker_address: &Address,

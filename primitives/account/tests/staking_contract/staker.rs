@@ -85,7 +85,6 @@ pub(crate) fn prepare_second_validator_for_redelegation(
         active_stake,
         inactive_stake,
         retired_stake,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -321,7 +320,6 @@ fn can_set_inactive_balance() {
         50_000_000,
         50_000_000,
         10_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -520,7 +518,6 @@ fn retire_inactive_stake_works_with_min_active_stake() {
         Policy::MINIMUM_STAKE,
         Policy::MINIMUM_STAKE + 1,
         1,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -751,7 +748,6 @@ fn retire_stake_does_not_violate_jail_or_inactive_releases() {
         0,
         Policy::MINIMUM_STAKE,
         10_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -785,7 +781,6 @@ fn retire_stake_does_not_violate_jail_or_inactive_releases() {
         0,
         Policy::MINIMUM_STAKE,
         20_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -845,7 +840,6 @@ fn retire_stake_does_not_violate_minimum_active_stake() {
         0,
         Policy::MINIMUM_STAKE + 1,
         1,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -952,7 +946,6 @@ fn cannot_retire_active_stake() {
         Policy::MINIMUM_STAKE,
         0,
         1,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -1308,7 +1301,6 @@ fn update_staker_with_stake_reactivation_works() {
         0,
         150_000_000,
         100_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -1537,7 +1529,6 @@ fn update_staker_remove_delegation_with_stake_reactivation_works() {
         0,
         150_000_000,
         100_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -1704,7 +1695,6 @@ fn update_staker_same_validator() {
         0,
         150_000_000,
         100_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -1891,7 +1881,6 @@ fn remove_stake_works() {
         0,
         0,
         Policy::MINIMUM_STAKE * 2,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -2106,7 +2095,6 @@ fn can_only_remove_retired_balance() {
         50_000_000,
         50_000_000,
         50_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -2583,7 +2571,6 @@ fn can_reserve_and_release_balance() {
         40_000_000,
         10_000_000,
         60_000_000,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -2671,7 +2658,6 @@ fn commit_failed_remove_stake_works_when_removing_staker() {
         0,
         0,
         Policy::MINIMUM_STAKE + 1,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -2884,7 +2870,6 @@ fn commit_failed_remove_stake_works_with_non_retired_balance() {
         0,
         Policy::MINIMUM_STAKE,
         Policy::MINIMUM_STAKE,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts

@@ -155,7 +155,6 @@ fn add_stake_policy_priority_to_active_balance_works() {
         1,
         Policy::MINIMUM_STAKE,
         50_000_000,
-        Policy::max_supported_version(),
     );
     assert!(staker_setup.active_stake < staker_setup.retired_stake);
     assert!(staker_setup.active_stake < staker_setup.inactive_stake);
@@ -303,7 +302,6 @@ fn add_stake_policy_to_inactive(protocol_version: u16) {
         0,
         Policy::MINIMUM_STAKE + 1,
         50_000_000,
-        Policy::max_supported_version(),
     );
     assert!(staker_setup.active_stake < staker_setup.retired_stake);
     assert!(staker_setup.active_stake < staker_setup.inactive_stake);
@@ -453,7 +451,6 @@ fn add_stake_with_only_retired_balance(protocol_version: u16) {
         0,
         0,
         50_000_000,
-        Policy::max_supported_version(),
     );
     assert!(staker_setup.active_stake < staker_setup.retired_stake);
     let data_store = staker_setup
@@ -593,7 +590,6 @@ fn add_stake_enforces_minimum_stake_works() {
         0,
         50_000_000,
         0,
-        Policy::max_supported_version(),
     );
     let data_store = staker_setup
         .accounts
@@ -686,16 +682,16 @@ fn add_stake_enforces_minimum_stake_works() {
 /* Legacy Add Stake testing */
 
 #[test]
-fn add_stake_legacy_works() {
+fn add_stake_legacy_0v_works() {
     add_stake(Policy::ADD_STAKE_PROTOCOL_UPGRADE_VERSION - 1);
 }
 
 #[test]
-fn add_stake_priority_legacy_works() {
+fn add_stake_priority_legacy_0v_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance(
+    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance_and_protocol(
         ValidatorState::Active,
         0,
         50_000_000,
@@ -841,11 +837,11 @@ fn add_stake_priority_legacy_works() {
 }
 
 #[test]
-fn add_stake_enforces_minimum_stake_legacy_works() {
+fn add_stake_enforces_minimum_stake_legacy_0v_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance(
+    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance_and_protocol(
         ValidatorState::Active,
         0,
         0,
@@ -950,11 +946,11 @@ fn add_stake_enforces_minimum_stake_legacy_works() {
 }
 
 #[test]
-fn add_stake_enforces_greater_than_zero_legacy_works() {
+fn add_stake_enforces_greater_than_zero_legacy_0v_works() {
     // -----------------------------------
     // Test setup:
     // -----------------------------------
-    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance(
+    let mut staker_setup = StakerSetup::setup_staker_with_inactive_retired_balance_and_protocol(
         ValidatorState::Active,
         0,
         Policy::MINIMUM_STAKE,

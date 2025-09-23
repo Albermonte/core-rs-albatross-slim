@@ -442,14 +442,13 @@ impl StakerSetup {
         active_stake: u64,
         inactive_stake: u64,
         retired_stake: u64,
-        protocol_version: u16,
     ) -> Self {
         Self::setup_staker_with_inactive_retired_balance_and_protocol(
             validator_state,
             active_stake,
             inactive_stake,
             retired_stake,
-            protocol_version,
+            Policy::max_supported_version(),
         )
     }
 
