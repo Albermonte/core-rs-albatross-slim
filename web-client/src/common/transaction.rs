@@ -367,10 +367,8 @@ impl Transaction {
         &self,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
-        protocol_version: u16,
     ) -> Result<PlainTransactionType, JsError> {
-        let plain =
-            self.to_plain_transaction(genesis_block_number, genesis_timestamp, protocol_version);
+        let plain = self.to_plain_transaction(genesis_block_number, genesis_timestamp);
         Ok(serde_wasm_bindgen::to_value(&plain)?.into())
     }
 
@@ -446,7 +444,6 @@ impl Transaction {
         &self,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
-        protocol_version: u16,
     ) -> PlainTransaction {
         PlainTransaction {
             transaction_hash: self.hash(),
@@ -535,7 +532,7 @@ impl Transaction {
                 }
             },
             size: self.serialized_size(),
-            valid: self.verify(None, protocol_version).is_ok(),
+            valid: false,
         }
     }
 
@@ -1032,10 +1029,9 @@ impl PlainTransactionDetails {
         block_height: Option<u32>,
         timestamp: Option<u64>,
         confirmations: Option<u32>,
-        protocol_version: u16,
     ) -> Self {
         Self {
-            transaction: tx.to_plain_transaction(None, None, protocol_version),
+            transaction: tx.to_plain_transaction(None, None),
             state,
             execution_result,
             block_height,
@@ -1050,7 +1046,6 @@ impl PlainTransactionDetails {
         current_block: u32,
         genesis_block_number: Option<u32>,
         genesis_timestamp: Option<u64>,
-        protocol_version: u16,
     ) -> Option<PlainTransactionDetails> {
         let block_number = hist_tx.block_number;
         let block_time = hist_tx.block_time;
@@ -1064,19 +1059,13 @@ impl PlainTransactionDetails {
         let (succeeded, transaction) = match hist_tx.data {
             HistoricTransactionData::Basic(ExecutedTransaction::Ok(inner)) => (
                 true,
-                Transaction::from(inner).to_plain_transaction(
-                    genesis_block_number,
-                    genesis_timestamp,
-                    protocol_version,
-                ),
+                Transaction::from(inner)
+                    .to_plain_transaction(genesis_block_number, genesis_timestamp),
             ),
             HistoricTransactionData::Basic(ExecutedTransaction::Err(inner)) => (
                 false,
-                Transaction::from(inner).to_plain_transaction(
-                    genesis_block_number,
-                    genesis_timestamp,
-                    protocol_version,
-                ),
+                Transaction::from(inner)
+                    .to_plain_transaction(genesis_block_number, genesis_timestamp),
             ),
             HistoricTransactionData::Reward(ref ev) => (
                 true,
