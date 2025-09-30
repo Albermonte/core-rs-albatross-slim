@@ -48,7 +48,7 @@ fn create_transaction(block: u32, value: u64) -> HistoricTransaction {
             BlockchainTransaction::new_basic(
                 Address::from_user_friendly_address("NQ09 VF5Y 1PKV MRM4 5LE1 55KV P6R2 GXYJ XYQF")
                     .unwrap(),
-                Address::burn_address(),
+                Policy::BURN_ADDRESS,
                 Coin::from_u64_unchecked(value),
                 Coin::from_u64_unchecked(0),
                 0,

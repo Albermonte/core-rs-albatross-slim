@@ -2,7 +2,6 @@ use nimiq_account::StakingContract;
 use nimiq_block::{EquivocationProof, MacroBlock, MacroHeader, SkipBlockInfo};
 use nimiq_blockchain_interface::AbstractBlockchain;
 use nimiq_database::mdbx::MdbxReadTransaction;
-use nimiq_keys::Address;
 use nimiq_primitives::{
     account::AccountType,
     coin::Coin,
@@ -312,8 +311,8 @@ impl Blockchain {
         // Create the inherent for the burned reward.
         if burned_reward > Coin::ZERO {
             let tx = RewardTransaction {
-                validator_address: Address::burn_address(),
-                recipient: Address::burn_address(),
+                validator_address: Policy::BURN_ADDRESS,
+                recipient: Policy::BURN_ADDRESS,
                 value: burned_reward,
             };
 

@@ -594,7 +594,7 @@ mod test {
     use nimiq_bls::{AggregateSignature, SecretKey};
     use nimiq_collections::BitSet;
     use nimiq_hash::{Blake2bHash, Blake2sHash, Hash, HashOutput};
-    use nimiq_keys::{Address, KeyPair, PrivateKey};
+    use nimiq_keys::{KeyPair, PrivateKey};
     use nimiq_primitives::{
         networks::NetworkId, policy::Policy, TendermintIdentifier, TendermintProposal,
         TendermintStep, TendermintVote,
@@ -675,7 +675,7 @@ mod test {
         let justification5 = key.sign(header5.hash().as_bytes());
 
         let proof1: EquivocationProof = ForkProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             header1.clone(),
             justification1.clone(),
             header2.clone(),
@@ -683,7 +683,7 @@ mod test {
         )
         .into();
         let proof2: EquivocationProof = ForkProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             header2.clone(),
             justification2.clone(),
             header3.clone(),
@@ -691,7 +691,7 @@ mod test {
         )
         .into();
         let proof3: EquivocationProof = ForkProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             header3.clone(),
             justification3.clone(),
             header1.clone(),
@@ -700,7 +700,7 @@ mod test {
         .into();
         // Different block height.
         let proof4: EquivocationProof = ForkProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             header4.clone(),
             justification4.clone(),
             header5.clone(),
@@ -821,7 +821,7 @@ mod test {
             .collect();
 
         let proof1: EquivocationProof = DoubleProposalProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposals[1].clone(),
             justifications[1].clone(),
             proposals[2].clone(),
@@ -829,7 +829,7 @@ mod test {
         )
         .into();
         let proof2: EquivocationProof = DoubleProposalProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposals[2].clone(),
             justifications[2].clone(),
             proposals[3].clone(),
@@ -837,7 +837,7 @@ mod test {
         )
         .into();
         let proof3: EquivocationProof = DoubleProposalProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposals[3].clone(),
             justifications[3].clone(),
             proposals[1].clone(),
@@ -846,7 +846,7 @@ mod test {
         .into();
         // Different block height.
         let proof4: EquivocationProof = DoubleProposalProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposals[4].clone(),
             justifications[4].clone(),
             proposals[5].clone(),
@@ -855,7 +855,7 @@ mod test {
         .into();
         // Different round.
         let proof5: EquivocationProof = DoubleProposalProof::new(
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposals[6].clone(),
             justifications[6].clone(),
             proposals[7].clone(),
@@ -962,7 +962,7 @@ mod test {
 
         let proof1: EquivocationProof = DoubleVoteProof::new(
             id.clone(),
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal1.clone(),
             signature1,
             signers.clone(),
@@ -973,7 +973,7 @@ mod test {
         .into();
         let proof2: EquivocationProof = DoubleVoteProof::new(
             id.clone(),
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal2.clone(),
             signature2,
             signers.clone(),
@@ -984,7 +984,7 @@ mod test {
         .into();
         let proof3: EquivocationProof = DoubleVoteProof::new(
             id.clone(),
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal3.clone(),
             signature3,
             signers.clone(),
@@ -996,7 +996,7 @@ mod test {
         // Different block height.
         let proof4: EquivocationProof = DoubleVoteProof::new(
             other_id1,
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal1.clone(),
             signature4,
             signers.clone(),
@@ -1008,7 +1008,7 @@ mod test {
         // Different round.
         let proof5: EquivocationProof = DoubleVoteProof::new(
             other_id2,
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal1.clone(),
             signature6,
             signers.clone(),
@@ -1020,7 +1020,7 @@ mod test {
         // Different step, 1.
         let proof6: EquivocationProof = DoubleVoteProof::new(
             other_id3,
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal1.clone(),
             signature8,
             signers.clone(),
@@ -1032,7 +1032,7 @@ mod test {
         // Different step, 2.
         let proof7: EquivocationProof = DoubleVoteProof::new(
             other_id4,
-            Address::burn_address(),
+            Policy::BURN_ADDRESS,
             proposal1.clone(),
             signature10,
             signers.clone(),

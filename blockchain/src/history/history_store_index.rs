@@ -29,7 +29,7 @@ use super::{
 };
 use crate::{history::HistoryTreeChunk, interface::HistoryIndexInterface, HistoryStore};
 
-// `RawTransactonHash` -> `EpochBasedIndex` (`epoch number || leaf_index`)
+// `RawTransactionHash` -> `EpochBasedIndex` (`epoch number || leaf_index`)
 declare_table!(TxHashTable, "LeafIndexByTxHash", RawTransactionHash => EpochBasedIndex);
 // `Address` -> `EpochBasedIndex` -> `Blake2bHash`
 declare_table!(AddressTable, "TxHashesByAddress", Address => EpochBasedIndex => Blake2bHash);
@@ -828,7 +828,7 @@ mod tests {
         let mut txn = env.write_transaction();
         history_store.add_to_history(&mut txn, Policy::genesis_block_number() + 1, &hist_txs);
 
-        // Those transactions should be part of the valitidy window
+        // Those transactions should be part of the validity window
         assert!(history_store.tx_in_validity_window(&ext_0.tx_hash(), Some(&txn)));
 
         assert!(history_store.tx_in_validity_window(&ext_1.tx_hash(), Some(&txn)));
@@ -1263,7 +1263,7 @@ mod tests {
         assert_eq!(query_1[4], *hashes[0]);
 
         let query_2 =
-            history_store.get_tx_hashes_by_address(&Address::burn_address(), 2, None, Some(&txn));
+            history_store.get_tx_hashes_by_address(&Policy::BURN_ADDRESS, 2, None, Some(&txn));
 
         assert_eq!(query_2.len(), 2);
         assert_eq!(query_2[0], *hashes[6]);
@@ -1463,7 +1463,7 @@ mod tests {
             block_number: block,
             block_time: 0,
             data: HistoricTransactionData::Reward(RewardEvent {
-                validator_address: Address::burn_address(),
+                validator_address: Policy::BURN_ADDRESS,
                 reward_address,
                 value: Coin::from_u64_unchecked(value),
             }),
@@ -1531,7 +1531,7 @@ mod tests {
                         "NQ09 VF5Y 1PKV MRM4 5LE1 55KV P6R2 GXYJ XYQF",
                     )
                     .unwrap(),
-                    Address::burn_address(),
+                    Policy::BURN_ADDRESS,
                     Coin::from_u64_unchecked(value),
                     Coin::from_u64_unchecked(0),
                     0,

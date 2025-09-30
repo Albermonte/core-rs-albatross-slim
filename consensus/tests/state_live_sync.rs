@@ -26,7 +26,7 @@ use nimiq_database::{
 };
 use nimiq_genesis::{NetworkId, NetworkInfo};
 use nimiq_hash::{Blake2bHash, Blake2sHash};
-use nimiq_keys::{Address, KeyPair};
+use nimiq_keys::KeyPair;
 use nimiq_network_interface::{
     network::Network,
     request::{Handle, RequestCommon},
@@ -754,7 +754,7 @@ async fn can_remove_chunks_related_to_invalid_blocks() {
                 .push(ExecutedTransaction::Ok(
                     TransactionBuilder::new_basic(
                         &KeyPair::default(),
-                        Address::burn_address(),
+                        Policy::BURN_ADDRESS,
                         Coin::MAX,
                         Coin::ZERO,
                         Policy::genesis_block_number(),

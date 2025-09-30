@@ -50,6 +50,16 @@ impl Policy {
         0x00, 0x00, 0x00, 0x00, 0x00,
     ]);
 
+    /// Returns the "burn address". This is an address for which it is extremely unlikely (basically
+    /// impossible) that anyone knows the corresponding private key. Consequently this address can
+    /// be used to "burn" coins (and is regularly used by Team Nimiq to do so).
+    /// To be clear, it's IMPOSSIBLE for ANYONE to use the funds sent to this address.
+    /// 'NQ07 0000 0000 0000 0000 0000 0000 0000 0000'
+    pub const BURN_ADDRESS: Address = Address([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+
     /// The maximum allowed size, in bytes, for a micro block body.
     pub const MAX_SIZE_MICRO_BODY: usize = 100_000;
 

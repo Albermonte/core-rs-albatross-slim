@@ -1,9 +1,9 @@
 use std::{fs, io, iter};
 
 use nimiq_collections::BitSet;
-use nimiq_keys::Address;
 use nimiq_primitives::{
     key_nibbles::KeyNibbles,
+    policy::Policy,
     trie::trie_node::{TrieNode, TrieNodeChild},
 };
 use nimiq_serde::Serialize;
@@ -64,7 +64,7 @@ fn main() -> io::Result<()> {
         )
     };
     fs::create_dir_all("in/user_friendly_address")?;
-    let burn = Address::burn_address();
+    let burn = Policy::BURN_ADDRESS;
     write("burn", burn.to_user_friendly_address())?;
     write(
         "burn_nospace",

@@ -499,7 +499,7 @@ mod tests {
             )
         });
         test_history_fn(|history_store| {
-            history_store.get_tx_hashes_by_address(&Address::burn_address(), 2, None, None)
+            history_store.get_tx_hashes_by_address(&Policy::BURN_ADDRESS, 2, None, None)
         });
         test_history_fn(|history_store| {
             history_store.get_tx_hashes_by_address(
@@ -568,7 +568,7 @@ mod tests {
             block_number: block,
             block_time: 0,
             data: HistoricTransactionData::Reward(RewardEvent {
-                validator_address: Address::burn_address(),
+                validator_address: Policy::BURN_ADDRESS,
                 reward_address,
                 value: Coin::from_u64_unchecked(value),
             }),
@@ -636,7 +636,7 @@ mod tests {
                         "NQ09 VF5Y 1PKV MRM4 5LE1 55KV P6R2 GXYJ XYQF",
                     )
                     .unwrap(),
-                    Address::burn_address(),
+                    Policy::BURN_ADDRESS,
                     Coin::from_u64_unchecked(value),
                     Coin::from_u64_unchecked(0),
                     0,

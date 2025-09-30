@@ -41,7 +41,7 @@ fn it_can_commit_and_revert_a_block_body() {
     let address_recipient = Address::from([2u8; Address::SIZE]);
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: address_validator.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
@@ -164,7 +164,7 @@ fn it_correctly_rewards_validators() {
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: address_validator_1.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
@@ -211,7 +211,7 @@ fn it_correctly_rewards_validators() {
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: address_validator_2.clone(),
         value: Coin::from_u64_unchecked(10000) + fee1 + fee2,
     };
@@ -265,7 +265,7 @@ fn it_checks_for_sufficient_funds() {
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: address_sender.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
@@ -421,7 +421,7 @@ fn accounts_performance() {
     genesis_builder.with_network(NetworkId::UnitAlbatross);
     let address_validator = Address::from([1u8; Address::SIZE]);
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: address_validator,
         value: Coin::from_u64_unchecked(10000),
     };
@@ -1024,7 +1024,7 @@ fn can_revert_inherents() {
 
     info!("Testing inherent Reward");
     let inherent = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: Address(rng.random()),
         value: Coin::from_u64_unchecked(10),
     };
@@ -1069,7 +1069,7 @@ fn can_revert_inherents() {
     // Testing failing inherent.
     info!("Testing inherent Reward");
     let inherent = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: Policy::BURN_ADDRESS,
         target: Policy::STAKING_CONTRACT_ADDRESS,
         value: Coin::from_u64_unchecked(10),
     };

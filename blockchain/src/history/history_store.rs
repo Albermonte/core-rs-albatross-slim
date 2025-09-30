@@ -1475,7 +1475,7 @@ mod tests {
             block_number: block,
             block_time: 0,
             data: HistoricTransactionData::Reward(RewardEvent {
-                validator_address: Address::burn_address(),
+                validator_address: Policy::BURN_ADDRESS,
                 reward_address,
                 value: Coin::from_u64_unchecked(value),
             }),
@@ -1543,7 +1543,7 @@ mod tests {
                         "NQ09 VF5Y 1PKV MRM4 5LE1 55KV P6R2 GXYJ XYQF",
                     )
                     .unwrap(),
-                    Address::burn_address(),
+                    Policy::BURN_ADDRESS,
                     Coin::from_u64_unchecked(value),
                     Coin::from_u64_unchecked(0),
                     0,

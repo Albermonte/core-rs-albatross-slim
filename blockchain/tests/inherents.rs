@@ -10,7 +10,6 @@ use nimiq_blockchain_interface::AbstractBlockchain;
 use nimiq_bls::AggregateSignature;
 use nimiq_database::{mdbx::MdbxDatabase, traits::WriteTransaction};
 use nimiq_hash::{Blake2sHash, HashOutput};
-use nimiq_keys::Address;
 use nimiq_primitives::{
     coin::Coin,
     networks::NetworkId,
@@ -154,8 +153,8 @@ fn it_can_create_batch_finalization_inherents() {
                 target,
                 value,
             } => {
-                if *target == Address::burn_address() {
-                    assert_eq!(*actual_validator_address, Address::burn_address());
+                if *target == Policy::BURN_ADDRESS {
+                    assert_eq!(*actual_validator_address, Policy::BURN_ADDRESS);
                     assert_eq!(*value, Coin::from_u64_unchecked(one_slot_reward));
                     got_penalize = true;
                 } else {

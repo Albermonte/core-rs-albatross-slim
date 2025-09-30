@@ -2,8 +2,7 @@ use std::ops::Range;
 
 use log::{debug, error, info, trace};
 use nimiq_hash::Blake2bHash;
-use nimiq_keys::Address;
-use nimiq_primitives::coin::Coin;
+use nimiq_primitives::{coin::Coin, policy::Policy};
 use nimiq_rpc::{
     primitives::{OutgoingTransaction, TransactionDetails},
     Client,
@@ -40,7 +39,6 @@ pub const READY_PERCENTAGE: u8 = 80;
 /// - Recipient: Burn address
 /// - Value: 1 Luna
 /// - Data: Hash of the generated `GenesisConfig`
-///
 pub fn generate_ready_tx(validator: String, hash: &Blake2bHash) -> OutgoingTransaction {
     info!(
         validator_address = validator,
@@ -49,7 +47,7 @@ pub fn generate_ready_tx(validator: String, hash: &Blake2bHash) -> OutgoingTrans
     );
     OutgoingTransaction {
         from: validator,
-        to: Address::burn_address().to_user_friendly_address(),
+        to: Policy::BURN_ADDRESS.to_user_friendly_address(),
         value: 1, //Lunas
         fee: 0,
         data: Some(hash.to_hex()),
@@ -71,7 +69,7 @@ pub fn generate_online_tx(validator: String) -> OutgoingTransaction {
     );
     OutgoingTransaction {
         from: validator,
-        to: Address::burn_address().to_user_friendly_address(),
+        to: Policy::BURN_ADDRESS.to_user_friendly_address(),
         value: 1, //Lunas
         fee: 0,
         data: Some(hex::encode(String::from(ONLINE_TX_DATA))),
@@ -131,7 +129,7 @@ fn is_valid_ready_txn(
     };
     Some(genesis_config_hash) == txn.data.as_ref()
         && block_window.contains(&block_number)
-        && txn.to_address == Address::burn_address().to_user_friendly_address()
+        && txn.to_address == Policy::BURN_ADDRESS.to_user_friendly_address()
 }
 
 /// Checks if the provided transaction meets the criteria in order to be
@@ -144,7 +142,7 @@ fn is_valid_online_txn(txn: &TransactionDetails, block_window: &Range<u32>) -> b
     // if we run a different version of the tool.
     Some(hex::encode(ONLINE_TX_DATA)) == txn.data
         && block_window.contains(&block_number)
-        && txn.to_address == Address::burn_address().to_user_friendly_address()
+        && txn.to_address == Policy::BURN_ADDRESS.to_user_friendly_address()
 }
 
 /// Sends a transaction into the Nimiq PoW chain

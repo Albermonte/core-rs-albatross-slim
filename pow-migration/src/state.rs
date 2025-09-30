@@ -160,7 +160,7 @@ pub async fn get_accounts(
             match node.account {
                 nimiq_rpc::primitives::Account::Basic(pow_account) => {
                     let mut pos_basic_account = pos_basic_account_from_account(&pow_account)?;
-                    if pos_basic_account.address == Address::burn_address() {
+                    if pos_basic_account.address == Policy::BURN_ADDRESS {
                         // In order to not alter the total supply, we must decrease the balances
                         // that were burnt in PoW to register validators and stakers (from the burn
                         // address balance).
@@ -192,7 +192,7 @@ pub async fn get_validators(
     block_window: Range<u32>,
 ) -> Result<Vec<GenesisValidator>, StateError> {
     let mut txns_by_sender = HashMap::<String, Vec<TransactionDetails>>::new();
-    let burn_address = Address::burn_address().to_string();
+    let burn_address = Policy::BURN_ADDRESS.to_string();
     let mut transactions =
         async_retryer(|| pow_client.get_transactions_by_address(&burn_address, u16::MAX)).await?;
     let mut possible_validators = HashMap::new();
@@ -338,7 +338,7 @@ pub async fn get_stakers(
     block_window: Range<u32>,
 ) -> Result<(Vec<GenesisStaker>, Vec<GenesisValidator>), StateError> {
     let mut txns_by_sender = HashMap::<String, Vec<TransactionDetails>>::new();
-    let burn_address = Address::burn_address().to_string();
+    let burn_address = Policy::BURN_ADDRESS.to_string();
     let mut transactions =
         async_retryer(|| pow_client.get_transactions_by_address(&burn_address, u16::MAX)).await?;
     let mut validators = HashMap::new();
