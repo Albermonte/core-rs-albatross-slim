@@ -3,6 +3,7 @@ use nimiq_keys::Address;
 use nimiq_primitives::{
     account::{AccountType, FailReason},
     coin::Coin,
+    policy::Policy,
 };
 use nimiq_serde::{Deserialize, Serialize};
 use nimiq_transaction::{
@@ -163,6 +164,12 @@ pub enum Log {
     PayoutReward { to: Address, value: Coin },
 
     #[serde(rename_all = "camelCase")]
+    BurnReward {
+        validator_address: Address,
+        value: Coin,
+    },
+
+    #[serde(rename_all = "camelCase")]
     Penalize {
         validator_address: Address,
         offense_event_block: u32,
@@ -320,6 +327,7 @@ impl Log {
                         .unwrap_or(false)
             }
             Log::PayoutReward { to, .. } => to == address,
+            Log::BurnReward { .. } => &Policy::BURN_ADDRESS == address,
             Log::Penalize {
                 validator_address, ..
             }

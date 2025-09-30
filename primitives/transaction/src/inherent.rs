@@ -24,6 +24,13 @@ pub enum Inherent {
         /// The reward amount.
         value: Coin,
     },
+    /// A reward is given for elected slots that did not get punished.
+    RewardBurn {
+        /// The validator address of the rewarded validator.
+        validator_address: Address,
+        /// The reward amount.
+        value: Coin,
+    },
     /// Penalties are the consequence of delaying blocks. They only affect the reward of a single slot.
     /// The validator gets deactivated as a consequence.
     Penalize { slot: PenalizedSlot },
@@ -47,6 +54,7 @@ impl Inherent {
     pub fn target(&self) -> &Address {
         match self {
             Inherent::Reward { target, .. } => target,
+            Inherent::RewardBurn { .. } => &Policy::BURN_ADDRESS,
             Inherent::Penalize { .. }
             | Inherent::Jail { .. }
             | Inherent::FinalizeBatch

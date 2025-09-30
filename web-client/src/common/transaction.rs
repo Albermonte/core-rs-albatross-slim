@@ -845,7 +845,7 @@ pub struct PlainTransaction {
     /// Basic transactions are simple value transfers between two regular address types and cannot contain
     /// any extra data. Basic transactions can be serialized to less bytes, so take up less place on the
     /// blockchain. Extended transactions on the other hand are all other transactions: contract creations
-    /// and interactions, staking transactions, transactions with exta data, etc.
+    /// and interactions, staking transactions, transactions with extra data, etc.
     #[tsify(type = "\"basic\" | \"extended\"")]
     pub format: TransactionFormat,
     /// The transaction's sender address in human-readable IBAN format.
@@ -1065,6 +1065,15 @@ impl PlainTransactionDetails {
                     .to_plain_transaction(genesis_block_number, genesis_timestamp),
             ),
             HistoricTransactionData::Reward(ref ev) => (
+                true,
+                PlainTransaction::from_reward_event(
+                    ev.clone(),
+                    hist_tx.tx_hash().into(),
+                    hist_tx.network_id,
+                    hist_tx.block_number,
+                ),
+            ),
+            HistoricTransactionData::RewardBurn(ref ev) => (
                 true,
                 PlainTransaction::from_reward_event(
                     ev.clone(),

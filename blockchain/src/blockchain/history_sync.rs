@@ -250,6 +250,14 @@ impl Blockchain {
                         value: ev.value,
                     })
                 }
+                HistoricTransactionData::RewardBurn(ev) => block_inherents
+                    .last_mut()
+                    .unwrap()
+                    .push(Inherent::RewardBurn {
+                        validator_address: ev.validator_address.clone(),
+
+                        value: ev.value,
+                    }),
                 HistoricTransactionData::Equivocation(_) => {}
                 HistoricTransactionData::Penalize(pen) => {
                     block_inherents
