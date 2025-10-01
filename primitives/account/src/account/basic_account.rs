@@ -215,7 +215,7 @@ impl AccountInherentInteraction for BasicAccount {
                 value,
                 validator_address,
             } => {
-                self.balance += *value;
+                self.balance -= *value;
 
                 inherent_logger.push_log(Log::BurnReward {
                     validator_address: validator_address.clone(),

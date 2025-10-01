@@ -1073,8 +1073,36 @@ fn reward_inherents_not_allowed() {
         make_sample_contract(data_store.write(&mut db_txn), None);
 
     let inherent = Inherent::Reward {
-        validator_address: Policy::BURN_ADDRESS,
+        validator_address: validator_address.clone(),
         target: validator_address,
+        value: Coin::ZERO,
+    };
+
+    assert_eq!(
+        staking_contract.commit_inherent(
+            &inherent,
+            &block_state,
+            data_store.write(&mut db_txn),
+            &mut InherentLogger::empty()
+        ),
+        Err(AccountError::InvalidForTarget)
+    );
+}
+
+#[test]
+fn reward_burn_inherents_not_allowed() {
+    let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
+    let accounts = Accounts::new(env.clone());
+    let data_store = accounts.data_store(&Policy::STAKING_CONTRACT_ADDRESS);
+    let block_state = BlockState::new(2, 2);
+    let mut db_txn = env.write_transaction();
+    let mut db_txn = (&mut db_txn).into();
+
+    let (validator_address, _, mut staking_contract) =
+        make_sample_contract(data_store.write(&mut db_txn), None);
+
+    let inherent = Inherent::RewardBurn {
+        validator_address,
         value: Coin::ZERO,
     };
 
