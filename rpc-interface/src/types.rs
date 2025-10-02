@@ -592,14 +592,6 @@ impl ExecutedTransaction {
                 tx.block_time,
                 cur_block_height,
             ),
-            HistoricTransactionData::RewardBurn(ref ev) => Self::from_reward_event(
-                ev,
-                tx.tx_hash().into(),
-                tx.network_id,
-                tx.block_number,
-                tx.block_time,
-                cur_block_height,
-            ),
             HistoricTransactionData::Penalize(_) => return None,
             HistoricTransactionData::Jail(_) => return None,
             HistoricTransactionData::Equivocation(_) => return None,
@@ -735,15 +727,6 @@ pub enum Inherent {
         hash: Blake2bHash,
     },
     #[serde(rename_all = "camelCase")]
-    RewardBurn {
-        block_number: u32,
-        block_time: u64,
-        validator_address: Address,
-        target: Address,
-        value: Coin,
-        hash: Blake2bHash,
-    },
-    #[serde(rename_all = "camelCase")]
     Penalize {
         block_number: u32,
         block_time: u64,
@@ -769,18 +752,6 @@ impl Inherent {
                 ref reward_address,
                 value,
             }) => Inherent::Reward {
-                block_number: hist_tx.block_number,
-                block_time: hist_tx.block_time,
-                validator_address: validator_address.clone(),
-                target: reward_address.clone(),
-                value,
-                hash: hist_tx.tx_hash().into(),
-            },
-            HistoricTransactionData::RewardBurn(RewardEvent {
-                ref validator_address,
-                ref reward_address,
-                value,
-            }) => Inherent::RewardBurn {
                 block_number: hist_tx.block_number,
                 block_time: hist_tx.block_time,
                 validator_address: validator_address.clone(),

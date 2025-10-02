@@ -171,19 +171,6 @@ impl AccountInherentInteraction for BasicAccount {
 
                 Ok(None)
             }
-            Inherent::RewardBurn {
-                validator_address,
-                value,
-            } => {
-                self.balance += *value;
-
-                inherent_logger.push_log(Log::BurnReward {
-                    validator_address: validator_address.clone(),
-                    value: *value,
-                });
-
-                Ok(None)
-            }
             _ => Err(AccountError::InvalidForTarget),
         }
     }
@@ -206,19 +193,6 @@ impl AccountInherentInteraction for BasicAccount {
 
                 inherent_logger.push_log(Log::PayoutReward {
                     to: target.clone(),
-                    value: *value,
-                });
-
-                Ok(())
-            }
-            Inherent::RewardBurn {
-                value,
-                validator_address,
-            } => {
-                self.balance -= *value;
-
-                inherent_logger.push_log(Log::BurnReward {
-                    validator_address: validator_address.clone(),
                     value: *value,
                 });
 

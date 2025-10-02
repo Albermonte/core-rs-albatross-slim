@@ -15,19 +15,13 @@ use crate::reward::RewardTransaction;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, SerializeContent, Deserialize)]
 #[repr(u8)]
 pub enum Inherent {
-    /// A reward is given for elected slots that did not get punished.
+    /// Represents both a reward given for elected slots that did not get punished or a reward burn.
+    /// The reward burn is represented by having the burn address in both `validator_address` and `target` fields.
     Reward {
         /// The validator address of the rewarded validator.
         validator_address: Address,
         /// The address the reward goes to.
         target: Address,
-        /// The reward amount.
-        value: Coin,
-    },
-    /// A reward is given for elected slots that did not get punished.
-    RewardBurn {
-        /// The validator address of the rewarded validator.
-        validator_address: Address,
         /// The reward amount.
         value: Coin,
     },
@@ -54,7 +48,6 @@ impl Inherent {
     pub fn target(&self) -> &Address {
         match self {
             Inherent::Reward { target, .. } => target,
-            Inherent::RewardBurn { .. } => &Policy::BURN_ADDRESS,
             Inherent::Penalize { .. }
             | Inherent::Jail { .. }
             | Inherent::FinalizeBatch

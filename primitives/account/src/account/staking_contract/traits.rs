@@ -798,9 +798,7 @@ impl AccountInherentInteraction for StakingContract {
                 // Since finalized epochs cannot be reverted, we don't need any receipts.
                 Ok(None)
             }
-            Inherent::Reward { .. } | Inherent::RewardBurn { .. } => {
-                Err(AccountError::InvalidForTarget)
-            }
+            Inherent::Reward { .. } => Err(AccountError::InvalidForTarget),
             Inherent::VersionUpgrade { new_version } => {
                 // Deactivate unsupporting validators.
                 let mut tx_logger = TransactionLog::empty();
@@ -885,9 +883,7 @@ impl AccountInherentInteraction for StakingContract {
                 // We should not be able to revert finalized epochs or batches!
                 Err(AccountError::InvalidForTarget)
             }
-            Inherent::Reward { .. } | Inherent::RewardBurn { .. } => {
-                Err(AccountError::InvalidForTarget)
-            }
+            Inherent::Reward { .. } => Err(AccountError::InvalidForTarget),
         }
     }
 }

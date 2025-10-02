@@ -117,9 +117,6 @@ impl HistoryStoreIndex {
                 HistoricTransactionData::Reward(ev) => {
                     txn.remove_item(&self.address_table, &ev.reward_address, &ordered_hash);
                 }
-                HistoricTransactionData::RewardBurn(ev) => {
-                    txn.remove_item(&self.address_table, &ev.reward_address, &ordered_hash);
-                }
                 HistoricTransactionData::Equivocation(_)
                 | HistoricTransactionData::Penalize(_)
                 | HistoricTransactionData::Jail(_) => {}
@@ -161,13 +158,6 @@ impl HistoryStoreIndex {
                     .push(ordered_hash);
             }
             HistoricTransactionData::Reward(ev) => {
-                // We only add reward inherents to the address database.
-                addresses
-                    .entry(ev.reward_address.clone())
-                    .or_default()
-                    .push(ordered_hash);
-            }
-            HistoricTransactionData::RewardBurn(ev) => {
                 // We only add reward inherents to the address database.
                 addresses
                     .entry(ev.reward_address.clone())

@@ -11,7 +11,7 @@ use nimiq_hash::{Blake2bHash, Blake2bHasher, Hash, Hasher};
 use nimiq_hash_derive::SerializeContent;
 use nimiq_keys::Address;
 use nimiq_mmr::hash::Hash as MMRHash;
-use nimiq_primitives::{coin::Coin, networks::NetworkId, policy::Policy};
+use nimiq_primitives::{coin::Coin, networks::NetworkId};
 use nimiq_serde::{Deserialize, Serialize};
 
 use crate::{inherent::Inherent, EquivocationLocator, ExecutedTransaction};
@@ -173,22 +173,6 @@ impl HistoricTransaction {
                         }),
                     });
                 }
-                Inherent::RewardBurn {
-                    validator_address,
-                    value,
-                } => {
-                    // We record a reward burn as a simple reward to the burn address for transaction history.
-                    hist_txs.push(HistoricTransaction {
-                        network_id,
-                        block_number,
-                        block_time,
-                        data: HistoricTransactionData::RewardBurn(RewardEvent {
-                            validator_address,
-                            reward_address: Policy::BURN_ADDRESS,
-                            value,
-                        }),
-                    });
-                }
                 Inherent::Penalize { slot } => hist_txs.push(HistoricTransaction {
                     network_id,
                     block_number,
@@ -232,7 +216,6 @@ impl HistoricTransaction {
                 .iter()
                 .filter_map(|inherent| match inherent {
                     Inherent::Reward { .. } => Some(()),
-                    Inherent::RewardBurn { .. } => Some(()),
                     Inherent::Penalize { .. } => Some(()),
                     Inherent::Jail { .. } => Some(()),
                     Inherent::FinalizeBatch => None,
@@ -260,7 +243,7 @@ impl HistoricTransaction {
     /// Unwraps the historic transaction and returns a reference to the underlying reward event.
     pub fn unwrap_reward(&self) -> &RewardEvent {
         match &self.data {
-            HistoricTransactionData::Reward(ev) | HistoricTransactionData::RewardBurn(ev) => ev,
+            HistoricTransactionData::Reward(ev) => ev,
             HistoricTransactionData::Basic(..)
             | HistoricTransactionData::Penalize(..)
             | HistoricTransactionData::Jail(..)
@@ -339,10 +322,8 @@ impl MMRHash<Blake2bHash> for HistoricTransaction {
 pub enum HistoricTransactionData {
     /// A basic transaction. It simply contains the transaction as contained in the block.
     Basic(ExecutedTransaction),
-    /// A reward for an active validator.
+    /// A reward for an active validator or a reward burn cased by punishments.
     Reward(RewardEvent),
-    /// A reward for an active validator.
-    RewardBurn(RewardEvent),
     /// A penalty for an inactive or non-responsive validator.
     Penalize(PenalizeEvent),
     /// A larger penalty for a misbehaving validator.
@@ -365,15 +346,6 @@ pub struct RewardEvent {
     pub validator_address: Address,
     /// The address the reward was paid out to.
     pub reward_address: Address,
-    /// The reward amount.
-    pub value: Coin,
-}
-
-/// A reward was burned.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RewardBurnEvent {
-    /// The validator address of the punished validator.
-    pub validator_address: Address,
     /// The reward amount.
     pub value: Coin,
 }

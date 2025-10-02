@@ -263,8 +263,9 @@ fn it_correctly_burns_rewards_from_validators() {
         Account::default(),
     );
 
-    let reward = Inherent::RewardBurn {
-        validator_address: validator_address_1.clone(),
+    let reward = Inherent::Reward {
+        validator_address: Policy::BURN_ADDRESS,
+        target: Policy::BURN_ADDRESS,
         value: Coin::from_u64_unchecked(10000),
     };
 
@@ -309,8 +310,9 @@ fn it_correctly_burns_rewards_from_validators() {
         Account::default()
     );
 
-    let reward = Inherent::RewardBurn {
-        validator_address: validator_address_1.clone(),
+    let reward = Inherent::Reward {
+        validator_address: Policy::BURN_ADDRESS,
+        target: Policy::BURN_ADDRESS,
         value: Coin::from_u64_unchecked(10000) + fee1 + fee2,
     };
 
@@ -1114,7 +1116,6 @@ fn can_revert_inherents() {
     let accounts = TestCommitRevert::new();
 
     let validator_address_1 = Address::from([1u8; Address::SIZE]);
-    let validator_address_2 = Address::from([2u8; Address::SIZE]);
 
     let mut generator = TransactionsGenerator::new(
         Accounts::new(accounts.env.clone()),
@@ -1139,19 +1140,9 @@ fn can_revert_inherents() {
     let receipts = accounts.test(&[], &[inherent], &block_state);
     assert!(matches!(receipts.inherents[..], [OperationReceipt::Ok(_)]));
 
-    info!("Testing inherent Reward Burn");
-    let inherent = Inherent::RewardBurn {
-        validator_address: validator_address_2.clone(),
-        value: Coin::from_u64_unchecked(10),
-    };
-
-    let receipts = accounts.test(&[], &[inherent], &block_state);
-    assert!(matches!(receipts.inherents[..], [OperationReceipt::Ok(_)]));
-
+    info!("Testing inherent Penalize");
     let (validator_key_pair, _, _) =
         generator.create_validator_and_staker(ValidatorState::Active, false, false);
-
-    info!("Testing inherent Penalize");
     let inherent = Inherent::Penalize {
         slot: PenalizedSlot {
             slot: rng.random_range(0..Policy::SLOTS),

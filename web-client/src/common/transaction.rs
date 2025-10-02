@@ -1073,15 +1073,6 @@ impl PlainTransactionDetails {
                     hist_tx.block_number,
                 ),
             ),
-            HistoricTransactionData::RewardBurn(ref ev) => (
-                true,
-                PlainTransaction::from_reward_event(
-                    ev.clone(),
-                    hist_tx.tx_hash().into(),
-                    hist_tx.network_id,
-                    hist_tx.block_number,
-                ),
-            ),
             HistoricTransactionData::Penalize(_) => return None,
             HistoricTransactionData::Jail(_) => return None,
             HistoricTransactionData::Equivocation(_) => return None,
