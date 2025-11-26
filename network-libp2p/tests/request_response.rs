@@ -51,40 +51,6 @@ struct TestResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct TestRequest2 {
-    request: u64,
-}
-impl RequestCommon for TestRequest2 {
-    type Kind = RequestMarker;
-    const TYPE_ID: u16 = 42;
-    type Response = TestResponse2;
-
-    const MAX_REQUESTS: u32 = MAX_REQUEST_RESPONSE_TEST_REQUEST;
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct TestResponse2 {
-    response: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct TestRequest3 {
-    request: u64,
-}
-impl RequestCommon for TestRequest3 {
-    type Kind = RequestMarker;
-    const TYPE_ID: u16 = 42;
-    type Response = TestResponse3;
-
-    const MAX_REQUESTS: u32 = MAX_REQUEST_RESPONSE_TEST_REQUEST;
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct TestResponse3 {
-    response: [u8; 8],
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct TestRequest4 {
     request: u64,
 }
@@ -251,6 +217,7 @@ fn network_config(address: Multiaddr) -> Config {
         only_secure_ws_connections: false,
         allow_loopback_addresses: true,
         dht_quorum: NonZeroU8::new(1).unwrap(),
+        network_buffer_size: 1024,
     }
 }
 

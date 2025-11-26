@@ -1,7 +1,7 @@
-use std::{borrow::Cow, collections::HashSet, hash::Hash, marker::PhantomData};
+use std::{borrow::Cow, collections::HashSet, hash::Hash, hint::black_box, marker::PhantomData};
 
 use criterion::{
-    black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
+    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use nimiq_database::{
     mdbx::{DatabaseConfig, MdbxDatabase},
@@ -59,13 +59,13 @@ impl Distribution<Address> for StandardUniform {
 }
 
 impl AsDatabaseBytes for Blake2bHash {
-    fn as_key_bytes(&self) -> Cow<[u8]> {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(&self.0)
     }
 }
 
 impl AsDatabaseBytes for Address {
-    fn as_key_bytes(&self) -> Cow<[u8]> {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(&self.0)
     }
 }

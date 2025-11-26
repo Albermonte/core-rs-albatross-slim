@@ -176,6 +176,7 @@ impl Client {
         config.network.peer_count_per_ip_max = web_config.peer_count_per_ip_max;
         config.network.peer_count_per_subnet_max = web_config.peer_count_per_subnet_max;
         config.network.num_initial_connections = web_config.num_initial_connections;
+        config.network.network_buffer_size = web_config.network_buffer_size;
 
         log::info!(?config, "Final configuration");
 
@@ -562,6 +563,16 @@ impl Client {
         let protocol_version = self.inner.protocol_version();
         tx.verify(Some(self.network_id), protocol_version)?;
 
+        // First, check if the transaction is already included
+
+        let included = self.get_transaction(tx.hash()).await;
+
+        if let Ok(details) = included {
+            // If the transaction was included we just return its details, using the appropiate type
+            let details: PlainTransactionDetails = serde_wasm_bindgen::from_value(details.into())?;
+            return Ok(details);
+        }
+
         // Check if we are already subscribed to the sender or recipient
         let already_subscribed = self
             .subscribed_addresses
@@ -713,12 +724,12 @@ impl Client {
         start_at: Option<String>,
         min_peers: Option<usize>,
     ) -> Result<PlainTransactionReceiptArrayType, JsError> {
-        if let Some(max) = limit {
-            if max > MAX_TRANSACTIONS_BY_ADDRESS {
-                return Err(JsError::new(
-                    "The maximum number of transaction receipts exceeds the one that is supported",
-                ));
-            }
+        if let Some(max) = limit
+            && max > MAX_TRANSACTIONS_BY_ADDRESS
+        {
+            return Err(JsError::new(
+                "The maximum number of transaction receipts exceeds the one that is supported",
+            ));
         }
 
         let start_at = if let Some(start_at) = start_at {
@@ -785,12 +796,12 @@ impl Client {
             None
         };
 
-        if let Some(max) = limit {
-            if max > MAX_TRANSACTIONS_BY_ADDRESS {
-                return Err(JsError::new(
-                    "The maximum number of transactions exceeds the one that is supported",
-                ));
-            }
+        if let Some(max) = limit
+            && max > MAX_TRANSACTIONS_BY_ADDRESS
+        {
+            return Err(JsError::new(
+                "The maximum number of transactions exceeds the one that is supported",
+            ));
         }
 
         let address = Address::from_any(address)?.take_native();
@@ -828,12 +839,11 @@ impl Client {
         let mut receipts_to_fetch = vec![];
         for (hash, block_number) in receipts.iter() {
             // Skip known transactions that are already considered confirmed.
-            if let Some(known_tx) = known_txs.get(hash) {
-                if matches!(known_tx.state, TransactionState::Confirmed)
-                    && known_tx.block_height == Some(*block_number)
-                {
-                    continue;
-                }
+            if let Some(known_tx) = known_txs.get(hash)
+                && matches!(known_tx.state, TransactionState::Confirmed)
+                && known_tx.block_height == Some(*block_number)
+            {
+                continue;
             }
 
             // Ignore all receipts that are older than since_block_height.
@@ -859,10 +869,10 @@ impl Client {
             }
             // If the known transaction was earlier than the configured cutoff or the earliest
             // retrievable receipt, do not try to verify it.
-            if let Some(block_height) = details.block_height {
-                if block_height < since_block_height {
-                    continue;
-                }
+            if let Some(block_height) = details.block_height
+                && block_height < since_block_height
+            {
+                continue;
             }
 
             receipts_to_fetch.push((hash.clone(), details.block_height));

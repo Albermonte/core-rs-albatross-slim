@@ -7,7 +7,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::{self, Display},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 
@@ -149,6 +152,9 @@ pub struct StateQueue<N: Network> {
     /// Reference to the blockchain.
     blockchain: Arc<RwLock<Blockchain>>,
 
+    /// Reference to the sync progress tracker
+    sync_progress: Arc<AtomicU32>,
+
     /// Reference to the network.
     network: Arc<N>,
 
@@ -194,6 +200,7 @@ impl<N: Network> StateQueue<N> {
         blockchain: Arc<RwLock<Blockchain>>,
         mut diff_queue: DiffQueue<N>,
         config: QueueConfig,
+        sync_tracker: Arc<AtomicU32>,
     ) -> Self {
         let chunk_request_component =
             ChunkRequestComponent::new(Arc::clone(&network), diff_queue.peer_list());
@@ -218,6 +225,7 @@ impl<N: Network> StateQueue<N> {
             blockchain,
             network,
             diff_queue,
+            sync_progress: sync_tracker,
             chunk_request_component,
             buffer: Default::default(),
             buffer_size: 0,
@@ -567,6 +575,10 @@ impl<N: Network> Stream for StateQueue<N> {
                             .unwrap_or(0);
 
                         let percentage = (key as f32 / u32::MAX as f32) * 100.0;
+
+                        self.sync_progress
+                            .store(percentage as u32, Ordering::Release);
+
                         log::info!(
                             ?start_key,
                             "Received state sync chunk, ~{:.2}% complete",
@@ -590,10 +602,10 @@ impl<N: Network> Stream for StateQueue<N> {
         if self.peers_became_nonempty.is_none() {
             self.peers_became_nonempty = self.chunk_request_component.wait_for_peers();
         }
-        if let Some(peers_became_nonempty) = &mut self.peers_became_nonempty {
-            if peers_became_nonempty.as_mut().poll(cx).is_ready() {
-                self.peers_became_nonempty = None;
-            }
+        if let Some(peers_became_nonempty) = &mut self.peers_became_nonempty
+            && peers_became_nonempty.as_mut().poll(cx).is_ready()
+        {
+            self.peers_became_nonempty = None;
         }
         // Obvious TOCTOU, but it would otherwise need to lock the
         // `chunk_request_component`'s peer list.

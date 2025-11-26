@@ -20,7 +20,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::error::Error;
 
 pub struct BlockchainDispatcher {
-    blockchain: BlockchainProxy,
+    pub blockchain: BlockchainProxy,
 }
 
 impl BlockchainDispatcher {
@@ -362,6 +362,44 @@ impl BlockchainInterface for BlockchainDispatcher {
             }
 
             Ok(txs.into())
+        } else {
+            Err(Error::NotSupportedForLightBlockchain)
+        }
+    }
+
+    async fn get_transaction_references_by_address(
+        &self,
+        address: Address,
+        max: Option<u16>,
+        start_at: Option<Blake2bHash>,
+    ) -> RPCResult<Vec<(Blake2bHash, u32)>, (), Self::Error> {
+        if let BlockchainReadProxy::Full(blockchain) = self.blockchain.read() {
+            // Get the transaction hashes for this address.
+            let raw_tx_hashes = blockchain
+                .history_store
+                .history_index()
+                .ok_or(Error::RequiresHistoryIndex)?
+                .get_tx_hashes_by_address(&address, max.unwrap_or(500), start_at, None);
+
+            let mut receipts = vec![];
+
+            for hash in raw_tx_hashes {
+                // Get all the historic transactions that correspond to this hash.
+                receipts.extend(
+                    blockchain
+                        .history_store
+                        .history_index()
+                        .unwrap()
+                        .get_hist_tx_by_hash(&hash, None)
+                        .iter()
+                        .map(|hist_tx| (hist_tx.tx_hash().into(), hist_tx.block_number)),
+                );
+            }
+
+            receipts.sort_unstable_by_key(|receipt| receipt.1);
+            receipts.reverse(); // Return newest receipts (highest block_number) first
+
+            Ok(receipts.into())
         } else {
             Err(Error::NotSupportedForLightBlockchain)
         }

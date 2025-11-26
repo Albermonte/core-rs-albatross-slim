@@ -58,9 +58,10 @@ use crate::{
 ///
 /// * We'll probably have this enum somewhere in the primitives. So this is a placeholder.
 ///
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
 pub enum SyncMode {
     /// History nodes: They use HistoryMacroSync + BlockLiveSync
+    #[default]
     History,
     /// Full nodes: They use LightMacroSync + StateLiveSync
     Full,
@@ -74,12 +75,6 @@ pub enum SyncMode {
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self, f)
-    }
-}
-
-impl Default for SyncMode {
-    fn default() -> Self {
-        Self::History
     }
 }
 
@@ -193,6 +188,10 @@ pub struct NetworkConfig {
     /// Optional, number of peers connected to at startup.
     #[builder(default = "4")]
     pub num_initial_connections: usize,
+
+    /// Optional, network buffer size
+    #[builder(default = "1024")]
+    pub network_buffer_size: usize,
 }
 
 /// Configuration for setting TLS for secure WebSocket
@@ -870,6 +869,7 @@ impl ClientConfigBuilder {
             allow_loopback_addresses,
             dht_quorum,
             num_initial_connections,
+            network_buffer_size,
         } = network;
 
         // TODO: if the config field of `listen_addresses` is empty, we should at least add `/ip4/127.0.0.1/...`
@@ -908,6 +908,7 @@ impl ClientConfigBuilder {
             allow_loopback_addresses: *allow_loopback_addresses,
             dht_quorum: *dht_quorum,
             num_initial_connections: *num_initial_connections,
+            network_buffer_size: *network_buffer_size,
         });
 
         // Configure consensus

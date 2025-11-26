@@ -28,7 +28,7 @@ futures = { workspace = true }
 hex = "0.4"
 parking_lot = "0.12"
 serde = "1.0"
-serde_with = "3.14"
+serde_with = "3.16"
 thiserror = "2.0"
 
 nimiq-account = { workspace = true }
@@ -38,6 +38,7 @@ nimiq-blockchain-interface = { workspace = true }
 nimiq-blockchain-proxy = { workspace = true }
 nimiq-bls = { workspace = true, features = ["serde-derive"] }
 nimiq-collections = { workspace = true }
+nimiq-consensus = {workspace = true}
 nimiq-hash = { workspace = true }
 nimiq-jsonrpc-client = { workspace = true }
 nimiq-jsonrpc-core = { workspace = true }

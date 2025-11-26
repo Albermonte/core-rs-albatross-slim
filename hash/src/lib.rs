@@ -176,7 +176,7 @@ impl Hasher for Blake2bHasher {
 }
 
 impl AsDatabaseBytes for Blake2bHash {
-    fn as_key_bytes(&self) -> Cow<[u8]> {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.as_bytes())
     }
 
@@ -332,7 +332,7 @@ impl Hasher for Sha256Hasher {
 
     fn finish(self) -> Sha256Hash {
         let result = self.0.finalize();
-        Sha256Hash::from(result.as_slice())
+        Sha256Hash::from(&result[..])
     }
 }
 

@@ -1,4 +1,8 @@
-use std::{fs, io, num::NonZeroU8, sync::Arc};
+use std::{
+    fs, io,
+    num::NonZeroU8,
+    sync::{atomic::AtomicU32, Arc},
+};
 
 use instant::SystemTime;
 use nimiq_block::Block;
@@ -190,42 +194,40 @@ impl ClientInner {
 
         #[cfg(feature = "zkp-prover")]
         // If the Prover is active we need to ensure that the proving keys are present.
-        if let Some(ref zk_prover_config) = config.zk_prover {
-            if !all_files_created(&zk_prover_config.prover_keys_path, true) {
-                match config.network_id {
-                    NetworkId::DevAlbatross => {
-                        log::info!("Setting up zero-knowledge prover keys for devnet.");
-                        log::info!(
-                            "This task only needs to be run once and might take about an hour."
-                        );
-                        log::info!(
-                            "Alternatively, you can place the proving keys in this folder: {:?}.",
-                            zk_prover_config.prover_keys_path
-                        );
-                        setup(
-                            &mut ChaCha20Rng::from_seed(DEVELOPMENT_SEED),
-                            &zk_prover_config.prover_keys_path,
-                            config.network_id,
-                            true,
-                        )?;
-                        log::info!("Setting the verification key.");
-                        let vk = load_verifying_data(&zk_prover_config.prover_keys_path)?;
-                        if vk != *ZKP_VERIFYING_DATA {
-                            return Err(Error::NanoZKP(NanoZKPError::InvalidMetadata));
-                        }
-                        log::debug!("Finished ZKP setup.");
+        if let Some(ref zk_prover_config) = config.zk_prover
+            && !all_files_created(&zk_prover_config.prover_keys_path, true)
+        {
+            match config.network_id {
+                NetworkId::DevAlbatross => {
+                    log::info!("Setting up zero-knowledge prover keys for devnet.");
+                    log::info!("This task only needs to be run once and might take about an hour.");
+                    log::info!(
+                        "Alternatively, you can place the proving keys in this folder: {:?}.",
+                        zk_prover_config.prover_keys_path
+                    );
+                    setup(
+                        &mut ChaCha20Rng::from_seed(DEVELOPMENT_SEED),
+                        &zk_prover_config.prover_keys_path,
+                        config.network_id,
+                        true,
+                    )?;
+                    log::info!("Setting the verification key.");
+                    let vk = load_verifying_data(&zk_prover_config.prover_keys_path)?;
+                    if vk != *ZKP_VERIFYING_DATA {
+                        return Err(Error::NanoZKP(NanoZKPError::InvalidMetadata));
                     }
-                    NetworkId::TestAlbatross | NetworkId::MainAlbatross => {
-                        log::error!(
-                            "Proving keys missing, please place them in this folder: {:?}.",
-                            zk_prover_config.prover_keys_path
-                        );
-                        return Err(Error::NanoZKP(NanoZKPError::Filesystem(io::Error::other(
-                            "Proving keys do not exist.",
-                        ))));
-                    }
-                    _ => {}
+                    log::debug!("Finished ZKP setup.");
                 }
+                NetworkId::TestAlbatross | NetworkId::MainAlbatross => {
+                    log::error!(
+                        "Proving keys missing, please place them in this folder: {:?}.",
+                        zk_prover_config.prover_keys_path
+                    );
+                    return Err(Error::NanoZKP(NanoZKPError::Filesystem(io::Error::other(
+                        "Proving keys do not exist.",
+                    ))));
+                }
+                _ => {}
             }
         }
 
@@ -349,6 +351,7 @@ impl ClientInner {
                 .network
                 .dht_quorum
                 .unwrap_or(NonZeroU8::new(3).unwrap()),
+            config.network.network_buffer_size,
         );
 
         log::debug!(
@@ -443,6 +446,8 @@ impl ClientInner {
         // Start buffering network events as early as possible
         let network_events = network.subscribe_events();
 
+        let syncer_tracker = Arc::new(AtomicU32::new(0));
+
         let (syncer_proxy, zkp_component) = match config.consensus.sync_mode {
             #[cfg(not(feature = "full-consensus"))]
             SyncMode::History => {
@@ -511,6 +516,7 @@ impl ClientInner {
                     zkp_component.proxy(),
                     network_events,
                     config.consensus.full_sync_threshold,
+                    Arc::clone(&syncer_tracker),
                 )
                 .await;
                 (syncer, zkp_component)
@@ -556,6 +562,7 @@ impl ClientInner {
             syncer_proxy,
             config.consensus.min_peers,
             zkp_component.proxy(),
+            syncer_tracker,
         );
 
         #[cfg(feature = "validator")]
@@ -650,14 +657,13 @@ impl ClientInner {
             config.consensus.sync_mode,
             SyncMode::Full | SyncMode::History
         ) && validator_or_mempool.is_none()
+            && let BlockchainProxy::Full(ref blockchain) = blockchain_proxy
         {
-            if let BlockchainProxy::Full(ref blockchain) = blockchain_proxy {
-                validator_or_mempool = Some(ValidatorOrMempool::Mempool(MempoolTask::new(
-                    &consensus,
-                    Arc::clone(blockchain),
-                    config.mempool,
-                )));
-            }
+            validator_or_mempool = Some(ValidatorOrMempool::Mempool(MempoolTask::new(
+                &consensus,
+                Arc::clone(blockchain),
+                config.mempool,
+            )));
         }
 
         // Start network.
