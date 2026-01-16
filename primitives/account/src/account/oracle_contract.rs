@@ -1,3 +1,4 @@
+use nimiq_hash::{sha512::Sha512Hasher, Blake2bHasher, Hasher, Keccak256Hasher, Sha256Hasher};
 use nimiq_keys::Address;
 #[cfg(feature = "interaction-traits")]
 use nimiq_primitives::account::AccountType;
@@ -202,19 +203,71 @@ impl AccountTransactionInteraction for OracleContract {
                         Vec::new()
                     };
 
-                    // Add the new hashes
-                    self.hashes.extend(hashes.clone());
+                    // Store the previous hash state for revert
+                    let previous_hash_state = if removed_hashes.is_empty() {
+                        self.hashes.last().cloned()
+                    } else {
+                        // If we removed hashes, the previous hash is the last one before removal
+                        // But since we already drained, we need to track it differently
+                        // Actually, if we removed hashes, the new "previous" is the last remaining hash
+                        self.hashes.last().cloned()
+                    };
+
+                    // Add the new hashes with chaining: hash_i = hash((hash_{i-1}, hash_i))
+                    use nimiq_transaction::account::htlc_contract::{AnyHash32, AnyHash64};
+                    for new_hash in &hashes {
+                        // Get the previous hash (last in the list, or zero hash if empty)
+                        let previous_hash = self.hashes.last().cloned().unwrap_or_else(|| {
+                            // Use a zero hash of the same type as the new hash
+                            match new_hash {
+                                AnyHash::Blake2b(_) => AnyHash::Blake2b(AnyHash32::default()),
+                                AnyHash::Sha256(_) => AnyHash::Sha256(AnyHash32::default()),
+                                AnyHash::Sha512(_) => AnyHash::Sha512(AnyHash64::default()),
+                                AnyHash::Keccak256(_) => AnyHash::Keccak256(AnyHash32::default()),
+                            }
+                        });
+
+                        // Concatenate previous hash bytes with new hash bytes
+                        let mut combined = previous_hash.as_bytes().to_vec();
+                        combined.extend_from_slice(new_hash.as_bytes());
+
+                        // Hash the combined bytes using the same algorithm as the new hash
+                        let chained_hash = match new_hash {
+                            AnyHash::Blake2b(_) => AnyHash::Blake2b(AnyHash32(
+                                Blake2bHasher::default().digest(&combined).into(),
+                            )),
+                            AnyHash::Sha256(_) => AnyHash::Sha256(AnyHash32(
+                                Sha256Hasher::default().digest(&combined).into(),
+                            )),
+                            AnyHash::Sha512(_) => AnyHash::Sha512(AnyHash64(
+                                Sha512Hasher::default().digest(&combined).into(),
+                            )),
+                            AnyHash::Keccak256(_) => AnyHash::Keccak256(AnyHash32(
+                                Keccak256Hasher::default().digest(&combined).into(),
+                            )),
+                        };
+
+                        // Store the chained hash
+                        self.hashes.push(chained_hash);
+                    }
 
                     tx_logger.push_log(Log::OracleUpdate {
                         contract_address: transaction.recipient.clone(),
                         hashes,
                     });
 
-                    // Return receipt with removed hashes for proper revert
-                    if removed_hashes.is_empty() {
+                    // Return receipt with removed hashes and previous hash state for proper revert
+                    // Only return a receipt if we removed hashes or if we need to track previous state
+                    if removed_hashes.is_empty() && previous_hash_state.is_none() {
                         Ok(None)
                     } else {
-                        Ok(Some(UpdateReceipt { removed_hashes }.into()))
+                        Ok(Some(
+                            UpdateReceipt {
+                                removed_hashes,
+                                previous_hash_state,
+                            }
+                            .into(),
+                        ))
                     }
                 }
                 IncomingOracleTransactionData::ChangeOwner { new_owner, proof } => {
@@ -260,7 +313,7 @@ impl AccountTransactionInteraction for OracleContract {
 
             match data {
                 IncomingOracleTransactionData::Update { hashes, .. } => {
-                    // Remove the hashes that were added (they're at the end)
+                    // Remove the chained hashes that were added (they're at the end)
                     for _ in 0..hashes.len() {
                         self.hashes.pop();
                     }
@@ -474,6 +527,8 @@ convert_receipt!(PrunedOracleContract);
 struct UpdateReceipt {
     /// The hashes that were removed from the beginning when the ring buffer limit was reached
     pub removed_hashes: Vec<AnyHash>,
+    /// The previous hash state before this update (for proper revert of chained hashes)
+    pub previous_hash_state: Option<AnyHash>,
 }
 
 convert_receipt!(UpdateReceipt);
