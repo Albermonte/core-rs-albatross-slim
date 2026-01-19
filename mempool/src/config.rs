@@ -14,6 +14,10 @@ pub struct MempoolConfig {
     pub filter_rules: MempoolRules,
     /// Mempool filter limit or size
     pub filter_limit: usize,
+    /// Enable cross-chain transaction validation
+    pub enable_cross_chain_validation: bool,
+    /// Maximum number of resubmissions allowed for cross-chain transactions
+    pub max_cross_chain_resubmissions: u32,
 }
 
 impl Default for MempoolConfig {
@@ -23,6 +27,8 @@ impl Default for MempoolConfig {
             control_size_limit: Mempool::DEFAULT_CONTROL_SIZE_LIMIT,
             filter_rules: MempoolRules::default(),
             filter_limit: MempoolFilter::DEFAULT_BLACKLIST_SIZE,
+            enable_cross_chain_validation: true,
+            max_cross_chain_resubmissions: 3,
         }
     }
 }

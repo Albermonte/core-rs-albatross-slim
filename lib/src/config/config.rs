@@ -838,6 +838,7 @@ impl ClientConfigBuilder {
             control_size_limit,
             filter_rules,
             filter_limit,
+            ..MempoolConfig::default()
         });
         self
     }

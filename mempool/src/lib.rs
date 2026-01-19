@@ -15,6 +15,8 @@ pub mod config;
 /// Mempool executor module
 pub mod executor;
 
+/// Cross-chain transaction validation module
+pub mod cross_chain;
 /// Mempool filter module
 pub mod filter;
 /// Main mempool module

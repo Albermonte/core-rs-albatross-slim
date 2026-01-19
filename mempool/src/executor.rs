@@ -18,6 +18,7 @@ use nimiq_utils::spawn;
 use parking_lot::RwLock;
 
 use crate::{
+    cross_chain::CrossChainValidator,
     filter::MempoolFilter,
     mempool_state::MempoolState,
     mempool_transactions::TxPriority,
@@ -35,6 +36,9 @@ pub(crate) struct MempoolExecutor<N: Network, T: Topic + Unpin + Sync> {
 
     // Mempool filter
     filter: Arc<RwLock<MempoolFilter>>,
+
+    // Cross-chain transaction validator (optional)
+    cross_chain_validator: Option<Arc<RwLock<CrossChainValidator>>>,
 
     // Ongoing verification tasks counter
     verification_tasks: Arc<AtomicU32>,
@@ -57,6 +61,7 @@ impl<N: Network, T: Topic + Unpin + Sync> MempoolExecutor<N, T> {
         blockchain: Arc<RwLock<Blockchain>>,
         state: Arc<RwLock<MempoolState>>,
         filter: Arc<RwLock<MempoolFilter>>,
+        cross_chain_validator: Option<Arc<RwLock<CrossChainValidator>>>,
         network: Arc<N>,
         txn_stream: BoxStream<'static, (Transaction, <N as Network>::PubsubId)>,
         verification_tasks: Arc<AtomicU32>,
@@ -65,6 +70,7 @@ impl<N: Network, T: Topic + Unpin + Sync> MempoolExecutor<N, T> {
             blockchain: Arc::clone(&blockchain),
             state,
             filter,
+            cross_chain_validator,
             network,
             network_id: blockchain.read().network_id,
             verification_tasks,
@@ -99,6 +105,7 @@ impl<N: Network, T: Topic + Unpin + Sync> Future for MempoolExecutor<N, T> {
             let blockchain = Arc::clone(&self.blockchain);
             let mempool_state = Arc::clone(&self.state);
             let filter = Arc::clone(&self.filter);
+            let cross_chain_validator = self.cross_chain_validator.clone();
             let network = Arc::clone(&self.network);
             let network_id = self.network_id;
 
@@ -110,6 +117,7 @@ impl<N: Network, T: Topic + Unpin + Sync> Future for MempoolExecutor<N, T> {
                     network_id,
                     &mempool_state,
                     filter,
+                    cross_chain_validator,
                     TxPriority::Medium,
                 );
 

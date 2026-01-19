@@ -28,6 +28,7 @@ use tokio_metrics::TaskMonitor;
 use crate::mempool_metrics::MempoolMetrics;
 use crate::{
     config::MempoolConfig,
+    cross_chain::CrossChainValidator,
     executor::MempoolExecutor,
     filter::{MempoolFilter, MempoolRules},
     mempool_state::{EvictionReason, MempoolState},
@@ -45,6 +46,9 @@ pub struct Mempool {
 
     /// Mempool filter
     pub(crate) filter: Arc<RwLock<MempoolFilter>>,
+
+    /// Cross-chain transaction validator (optional)
+    pub(crate) cross_chain_validator: Option<Arc<RwLock<CrossChainValidator>>>,
 
     /// Mempool executor handle used to stop the executor
     pub(crate) executor_handle: Mutex<Option<AbortHandle>>,
@@ -70,6 +74,15 @@ impl Mempool {
             config.control_size_limit,
         )));
 
+        // Initialize cross-chain validator if enabled
+        let cross_chain_validator = if config.enable_cross_chain_validation {
+            Some(Arc::new(RwLock::new(CrossChainValidator::new(
+                config.max_cross_chain_resubmissions,
+            ))))
+        } else {
+            None
+        };
+
         Self {
             blockchain,
             state: Arc::clone(&state),
@@ -77,6 +90,7 @@ impl Mempool {
                 config.filter_rules,
                 config.filter_limit,
             ))),
+            cross_chain_validator,
             executor_handle: Mutex::new(None),
             control_executor_handle: Mutex::new(None),
             verification_tasks: Arc::new(AtomicU32::new(0)),
@@ -102,6 +116,7 @@ impl Mempool {
             Arc::clone(&self.blockchain),
             Arc::clone(&self.state),
             Arc::clone(&self.filter),
+            self.cross_chain_validator.clone(),
             Arc::clone(&network),
             txn_stream,
             Arc::clone(&self.verification_tasks),
@@ -621,6 +636,7 @@ impl Mempool {
         let blockchain = Arc::clone(&self.blockchain);
         let mempool_state = Arc::clone(&self.state);
         let filter = Arc::clone(&self.filter);
+        let cross_chain_validator = self.cross_chain_validator.clone();
         let network_id = blockchain.read().network_id;
         verify_tx(
             transaction,
@@ -628,6 +644,7 @@ impl Mempool {
             network_id,
             &mempool_state,
             filter,
+            cross_chain_validator,
             tx_priority.unwrap_or(TxPriority::Medium),
         )
     }

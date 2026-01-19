@@ -323,6 +323,17 @@ level = "debug"
 # Default: 25000
 #blacklist_limit = 25000
 
+# Enable cross-chain transaction validation for bridge transactions.
+# When enabled, bridge transactions are validated against bridge account state.
+# Default: true
+#enable_cross_chain_validation = true
+
+# Maximum number of resubmissions allowed for cross-chain transactions.
+# When oracle state updates invalidate transaction proofs, transactions can be
+# resubmitted with updated proofs up to this limit.
+# Default: 3
+#max_cross_chain_resubmissions = 3
+
 # Rules to filter mempool transaction by.
 #[mempool.filter]
 

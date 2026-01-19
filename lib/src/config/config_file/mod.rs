@@ -417,6 +417,8 @@ pub struct MempoolSettings {
     pub size_limit: Option<usize>,
     pub control_size_limit: Option<usize>,
     pub blacklist_limit: Option<usize>,
+    pub enable_cross_chain_validation: Option<bool>,
+    pub max_cross_chain_resubmissions: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -481,6 +483,8 @@ impl From<MempoolSettings> for MempoolConfig {
                 .blacklist_limit
                 .unwrap_or(MempoolFilter::DEFAULT_BLACKLIST_SIZE),
             filter_rules: mempool.filter.map(MempoolRules::from).unwrap_or_default(),
+            enable_cross_chain_validation: mempool.enable_cross_chain_validation.unwrap_or(true),
+            max_cross_chain_resubmissions: mempool.max_cross_chain_resubmissions.unwrap_or(3),
         }
     }
 }
