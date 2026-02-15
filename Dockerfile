@@ -13,7 +13,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /root
 COPY ./ core-rs-albatross
 RUN cd core-rs-albatross && \
-    cargo build --release --bin nimiq-client --bin nimiq-bls --bin nimiq-address
+    cargo build --release -p nimiq-client -p nimiq-tools --bin nimiq-client --bin nimiq-bls --bin nimiq-address
 
 FROM ubuntu:24.04
 
