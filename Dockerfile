@@ -47,9 +47,9 @@ EXPOSE 8443 8648 9100
 CMD [ "/usr/bin/tini", "--", "nimiq-client" ]
 
 # Labels for image metadata.
-LABEL org.opencontainers.image.title="Nimiq core-rs-albatross" \
-      org.opencontainers.image.description="Rust implementation of the Nimiq Blockchain Core Albatross Branch (Ubuntu image)" \
-      org.opencontainers.image.url="https://github.com/nimiq/core-rs-albatross" \
-      org.opencontainers.image.vendor="Nimiq Foundation" \
+LABEL org.opencontainers.image.title="Nimiq core-rs-albatross-slim" \
+      org.opencontainers.image.description="Slim Nimiq history node exposing 11 RPC methods (Ubuntu image)" \
+      org.opencontainers.image.url="https://github.com/albermonte/core-rs-albatross-slim" \
+      org.opencontainers.image.vendor="albermonte" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/nimiq/core-rs-albatross/"
+      org.opencontainers.image.source="https://github.com/albermonte/core-rs-albatross-slim"
