@@ -131,6 +131,11 @@ impl<N: Network> ConsensusProxy<N> {
         self.established_flag.load(Ordering::Acquire)
     }
 
+    /// Returns a shared reference to the established flag.
+    pub fn established_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.established_flag)
+    }
+
     /// Returns true if the node is ready to start the validator/mempool.
     pub fn is_ready_for_validation(&self) -> bool {
         self.established_flag.load(Ordering::Acquire)

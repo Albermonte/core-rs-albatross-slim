@@ -365,11 +365,16 @@ impl Blockchain {
                 // Prune the Chain Store.
                 this.chain_store.prune_epoch(pruned_epoch, &mut txn);
 
-                if !this.config.keep_history {
-                    // Prune the History Store.
-                    // We will never prune pre-genesis data here.
-                    if pruned_epoch > 0 {
+                if pruned_epoch > 0 {
+                    if !this.config.keep_history {
+                        // Prune the History Store entirely (MMR + transactions).
                         this.history_store.remove_history(&mut txn, pruned_epoch);
+                    } else {
+                        // When keeping history, still prune MMR tree data for old
+                        // epochs to save storage. Transaction data is retained for
+                        // RPC queries; only proof nodes are discarded.
+                        this.history_store
+                            .remove_history_tree(&mut txn, pruned_epoch);
                     }
                 }
             }

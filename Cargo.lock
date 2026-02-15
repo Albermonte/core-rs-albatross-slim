@@ -835,6 +835,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35900b6c8d709fb1d854671ae27aeaa9eec2f8b01b364e1619a40da3e6fe2afe"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -2887,6 +2889,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
 
 [[package]]
+name = "jobserver"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3836,7 +3848,6 @@ dependencies = [
  "nimiq-bls",
  "nimiq-collections",
  "nimiq-database-value",
- "nimiq-database-value-derive",
  "nimiq-hash",
  "nimiq-hash_derive",
  "nimiq-keys",
@@ -3970,7 +3981,6 @@ dependencies = [
  "nimiq-time",
  "nimiq-utils",
  "tokio",
- "tokio-metrics",
  "tracing",
 ]
 
@@ -4048,6 +4058,9 @@ dependencies = [
 [[package]]
 name = "nimiq-database-value"
 version = "1.2.1"
+dependencies = [
+ "zstd",
+]
 
 [[package]]
 name = "nimiq-database-value-derive"
@@ -4326,9 +4339,6 @@ dependencies = [
  "nimiq-keys",
  "nimiq-light-blockchain",
  "nimiq-log",
- "nimiq-mempool",
- "nimiq-mempool-task",
- "nimiq-metrics-server",
  "nimiq-network-interface",
  "nimiq-network-libp2p",
  "nimiq-primitives",
@@ -4337,9 +4347,6 @@ dependencies = [
  "nimiq-test-log",
  "nimiq-time",
  "nimiq-utils",
- "nimiq-validator",
- "nimiq-validator-network",
- "nimiq-wallet",
  "nimiq-zkp",
  "nimiq-zkp-circuits",
  "nimiq-zkp-component",
@@ -4707,20 +4714,16 @@ dependencies = [
 name = "nimiq-rpc-interface"
 version = "1.2.1"
 dependencies = [
- "ark-groth16",
- "ark-mnt6-753",
  "async-trait",
  "clap",
  "futures-util",
  "hex",
  "nimiq-account",
  "nimiq-block",
- "nimiq-blockchain",
  "nimiq-blockchain-interface",
  "nimiq-blockchain-proxy",
  "nimiq-bls",
  "nimiq-collections",
- "nimiq-consensus",
  "nimiq-hash",
  "nimiq-jsonrpc-client",
  "nimiq-jsonrpc-core",
@@ -4731,7 +4734,6 @@ dependencies = [
  "nimiq-transaction",
  "nimiq-vrf",
  "nimiq-zkp-component",
- "parking_lot",
  "serde",
  "serde_json",
  "serde_with",
@@ -4744,42 +4746,23 @@ version = "1.2.1"
 dependencies = [
  "async-trait",
  "futures-util",
- "hex",
  "nimiq-account",
- "nimiq-block",
  "nimiq-blockchain",
  "nimiq-blockchain-interface",
  "nimiq-blockchain-proxy",
- "nimiq-bls",
- "nimiq-collections",
- "nimiq-consensus",
- "nimiq-database",
  "nimiq-hash",
  "nimiq-jsonrpc-core",
  "nimiq-jsonrpc-derive",
  "nimiq-jsonrpc-server",
  "nimiq-keys",
- "nimiq-mempool",
- "nimiq-network-interface",
- "nimiq-network-libp2p",
  "nimiq-primitives",
  "nimiq-rpc-interface",
  "nimiq-serde",
- "nimiq-transaction",
- "nimiq-transaction-builder",
- "nimiq-utils",
- "nimiq-validator",
- "nimiq-validator-network",
- "nimiq-vrf",
- "nimiq-wallet",
- "nimiq-zkp-component",
- "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
- "tracing",
 ]
 
 [[package]]
@@ -4991,7 +4974,6 @@ dependencies = [
  "hex",
  "nimiq-bls",
  "nimiq-database-value",
- "nimiq-database-value-derive",
  "nimiq-hash",
  "nimiq-hash_derive",
  "nimiq-keys",
@@ -8837,3 +8819,31 @@ name = "zmij"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30e0d8dffbae3d840f64bda38e28391faef673a7b5a6017840f2a106c8145868"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

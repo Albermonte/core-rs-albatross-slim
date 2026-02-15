@@ -68,6 +68,10 @@ members = [
   "zkp-primitives/pedersen-generators",
 ]
 
+default-members = [
+  "client",
+]
+
 resolver = "2"
 
 # Force nimiq-bls and nimiq-zkp to be built with optimization level 2 in

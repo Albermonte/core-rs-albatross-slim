@@ -74,16 +74,13 @@ nimiq-bls = { workspace = true }
 nimiq-consensus = { workspace = true, default-features = false }
 nimiq-database = { workspace = true, optional = true }
 nimiq-dht = { workspace = true, optional = true }
-nimiq-genesis = { workspace = true, default-features = false }
+nimiq-genesis = { workspace = true, default-features = false, features = ["genesis-override"] }
 nimiq-hash = { workspace = true }
 nimiq-jsonrpc-core = { workspace = true, optional = true }
 nimiq-jsonrpc-server = { workspace = true, optional = true }
 nimiq-keys = { workspace = true }
 nimiq-light-blockchain = { workspace = true }
 nimiq-log = { workspace = true, optional = true }
-nimiq-mempool = { workspace = true, optional = true }
-nimiq-mempool-task = { workspace = true, optional = true }
-nimiq-metrics-server = { workspace = true, optional = true }
 nimiq-network-libp2p = { workspace = true }
 nimiq-network-interface = { workspace = true }
 nimiq-primitives = { workspace = true, features = ["networks"] }
@@ -91,11 +88,6 @@ nimiq-rpc-server = { workspace = true, optional = true }
 nimiq-serde = { workspace = true }
 nimiq-time = { workspace = true }
 nimiq-utils = { workspace = true, features = ["time", "key-store"] }
-nimiq-validator = { workspace = true, optional = true, features = [
-    "trusted_push",
-] }
-nimiq-validator-network = { workspace = true, optional = true }
-nimiq-wallet = { workspace = true, optional = true, features = ["store"] }
 nimiq-zkp = { workspace = true }
 nimiq-zkp-circuits = { workspace = true }
 nimiq-zkp-component = { workspace = true }
@@ -108,7 +100,7 @@ nimiq-test-log = { workspace = true }
 [features]
 database-storage = ["nimiq-database", "nimiq-zkp-component/database-storage"]
 deadlock = ["parking_lot/deadlock_detection"]
-default = ["full-consensus", "extended-metrics"]
+default = ["full-consensus"]
 dht-fallback = [
     "http",
     "http-body-util",
@@ -118,7 +110,6 @@ dht-fallback = [
     "rustls",
     "serde_json",
 ]
-extended-metrics = ["nimiq-metrics-server/extended-staking"]
 full-consensus = [
     "database-storage",
     "dht-fallback",
@@ -129,48 +120,18 @@ full-consensus = [
 ]
 logging = ["nimiq-log", "serde_json", "tokio", "tracing-subscriber"]
 loki = ["logging", "tracing-loki"]
-metrics-server = [
-    "nimiq-metrics-server",
-    "nimiq-network-libp2p/metrics",
-    "nimiq-validator/metrics",
-]
 panic = ["log-panics"]
-parallel = [
-    "nimiq-primitives/parallel",
-    "nimiq-zkp/parallel",
-    "nimiq-zkp-circuits/parallel",
-    "nimiq-zkp-component/parallel",
-    "nimiq-zkp-primitives/parallel",
-]
 rpc-server = [
     "nimiq-jsonrpc-core",
     "nimiq-jsonrpc-server",
     "nimiq-rpc-server",
-    "nimiq-wallet",
-    "validator",
 ]
 signal-handling = ["signal-hook", "tokio"]
 tokio-console = ["console-subscriber", "logging", "tokio/tracing"]
 tokio-websocket = ["nimiq-network-libp2p/tokio-websocket"]
-validator = [
-    "database-storage",
-    "nimiq-mempool",
-    "nimiq-mempool-task",
-    "nimiq-validator",
-    "nimiq-validator-network",
-    "nimiq-rpc-server",
-]
-wallet = ["database-storage", "nimiq-wallet"]
 web-logging = [
     "nimiq-log",
     "time/wasm-bindgen",
     "tracing-subscriber",
     "tracing-web",
-]
-zkp-prover = [
-    "nimiq-primitives/zkp-prover",
-    "nimiq-zkp/zkp-prover",
-    "nimiq-zkp-circuits/zkp-prover",
-    "nimiq-zkp-component/zkp-prover",
-    "nimiq-zkp-primitives/zkp-prover",
 ]

@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, collections::HashSet, fmt, fmt::Debug};
+use std::{borrow::Cow, cmp::Ordering, collections::HashSet, fmt, fmt::Debug};
 
-use nimiq_database_value_derive::DbSerializable;
+use nimiq_database_value::{AsDatabaseBytes, FromDatabaseBytes, IntoDatabaseValue};
 use nimiq_hash::{Blake2bHash, Blake2sHash, Hash};
 use nimiq_hash_derive::SerializeContent;
 use nimiq_keys::{Ed25519PublicKey, Ed25519Signature};
@@ -15,7 +15,7 @@ use crate::{
 
 /// The struct representing a Micro block.
 #[derive(
-    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize, DbSerializable,
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize,
 )]
 pub struct MicroBlock {
     /// The header, contains some basic information and commitments to the body and the state.
@@ -25,6 +25,31 @@ pub struct MicroBlock {
     pub justification: Option<MicroJustification>,
     /// The body of the micro-block.
     pub body: Option<MicroBody>,
+}
+
+impl AsDatabaseBytes for MicroBlock {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
+        let raw = Serialize::serialize_to_vec(self);
+        Cow::Owned(nimiq_database_value::compressed::compress(&raw))
+    }
+}
+
+impl FromDatabaseBytes for MicroBlock {
+    fn from_key_bytes(bytes: &[u8]) -> Self {
+        let decompressed = nimiq_database_value::compressed::decompress(bytes);
+        Deserialize::deserialize_from_vec(&decompressed).unwrap()
+    }
+}
+
+impl IntoDatabaseValue for MicroBlock {
+    fn database_byte_size(&self) -> usize {
+        self.as_key_bytes().len()
+    }
+
+    fn copy_into_database(&self, bytes: &mut [u8]) {
+        let compressed = self.as_key_bytes();
+        bytes[..compressed.len()].copy_from_slice(&compressed);
+    }
 }
 
 impl MicroBlock {

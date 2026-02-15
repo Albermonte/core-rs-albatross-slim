@@ -1,10 +1,9 @@
-use std::{collections::HashSet, iter::FromIterator, sync::Arc};
+use std::collections::HashSet;
 
 use nimiq_jsonrpc_server::{
     AllowListDispatcher, Config, Cors, Credentials, ModularDispatcher, Server as _Server,
 };
-use nimiq_rpc_server::{dispatchers::*, eth_interface::*};
-use nimiq_wallet::WalletStore;
+use nimiq_rpc_server::dispatchers::*;
 
 #[cfg(feature = "rpc-server")]
 use crate::config::config::RpcServerConfig;
@@ -12,12 +11,23 @@ use crate::{client::Client, config::consts::default_bind, error::Error};
 
 pub type Server = _Server<AllowListDispatcher<ModularDispatcher>>;
 
+/// The 11 RPC methods this lightweight history node exposes.
+const ALLOWED_METHODS: &[&str] = &[
+    "getAccountByAddress",
+    "getTransactionsByAddress",
+    "getTransactionByHash",
+    "getTransactionsByBlockNumber",
+    "getTransactionsByBatchNumber",
+    "getBlockNumber",
+    "getBatchNumber",
+    "getBlockByNumber",
+    "isConsensusEstablished",
+    "subscribeForHeadBlock",
+    "subscribeForHeadBlockHash",
+];
+
 #[cfg(feature = "rpc-server")]
-pub fn initialize_rpc_server(
-    client: &Client,
-    config: RpcServerConfig,
-    wallet_store: Arc<WalletStore>,
-) -> Result<Server, Error> {
+pub fn initialize_rpc_server(client: &Client, config: RpcServerConfig) -> Result<Server, Error> {
     let ip = config.bind_to.unwrap_or_else(default_bind);
     log::info!("Initializing RPC server: {}:{}", ip, config.port);
 
@@ -26,12 +36,7 @@ pub fn initialize_rpc_server(
         Credentials::new_from_blake2b(credentials.username, credentials.password_hash.0 .0)
     });
 
-    let allowed_methods = config.allowed_methods.unwrap_or_default();
-    let allowed_methods = if allowed_methods.is_empty() {
-        None
-    } else {
-        Some(HashSet::from_iter(allowed_methods))
-    };
+    let allowed_methods: HashSet<String> = ALLOWED_METHODS.iter().map(|s| (*s).to_string()).collect();
 
     let cors_domains = config.cors_domains.unwrap_or_default();
     let is_cors_wildcard = cors_domains.iter().any(|origin| origin.trim() == "*");
@@ -43,48 +48,17 @@ pub fn initialize_rpc_server(
 
     let mut dispatcher = ModularDispatcher::default();
 
-    let wallet_dispatcher = WalletDispatcher::new(wallet_store);
-    let unlocked_wallets = Arc::clone(&wallet_dispatcher.unlocked_wallets);
-
     dispatcher.add(BlockchainDispatcher::new(client.blockchain()));
-
-    dispatcher.add(ConsensusDispatcher::new(
-        client.consensus_proxy(),
-        Some(unlocked_wallets),
-    ));
-    dispatcher.add(NetworkDispatcher::new(client.network()));
-    if let Some(mempool) = client.mempool() {
-        dispatcher.add(MempoolDispatcher::new(client.consensus_proxy(), mempool));
-    }
-    dispatcher.add(PolicyDispatcher {});
-    if let Some(validator_state) = client.validator_state() {
-        dispatcher.add(ValidatorDispatcher::new(
-            validator_state,
-            client.consensus_proxy(),
-        ));
-    }
-    dispatcher.add(wallet_dispatcher);
-
-    dispatcher.add(ZKPComponentDispatcher::new(client.zkp_component()));
-
-    // Eth interface dispatchers
-    dispatcher.add(GossipDispatcher::new(
-        client.consensus_proxy(),
-        client.blockchain(),
-    ));
-
-    dispatcher.add(HistoryDispatcher::new(client.blockchain()));
-
-    dispatcher.add(StateDispatcher::new(client.blockchain()));
+    dispatcher.add(ConsensusDispatcher::new(client.consensus_proxy().established_flag()));
 
     Ok(Server::new(
         Config {
             bind_to: (config.bind_to.unwrap_or_else(default_bind), config.port).into(),
-            enable_websocket: false,
+            enable_websocket: true,
             ip_whitelist: None,
             basic_auth,
             cors: Some(cors_config),
         },
-        AllowListDispatcher::new(dispatcher, allowed_methods),
+        AllowListDispatcher::new(dispatcher, Some(allowed_methods)),
     ))
 }

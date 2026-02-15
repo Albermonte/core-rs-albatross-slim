@@ -112,6 +112,13 @@ impl<S: HistoryInterface, I: HistoryIndexInterface> HistoryInterface for History
         }
     }
 
+    fn remove_history_tree(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32) {
+        match self {
+            HistoryStoreProxy::WithIndex(index) => index.remove_history_tree(txn, epoch_number),
+            HistoryStoreProxy::WithoutIndex(store) => store.remove_history_tree(txn, epoch_number),
+        }
+    }
+
     /// Obtains the current history root at the given block.
     fn get_history_tree_root(
         &self,

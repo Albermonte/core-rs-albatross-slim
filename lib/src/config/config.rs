@@ -845,13 +845,13 @@ impl ClientConfigBuilder {
             consensus,
             zk_prover,
             rpc_server,
-            metrics_server,
+            metrics_server: _,
             log: _,        // Note: log settings are handled elsewhere in the application
             prover_log: _, // Note: prover log settings are handled elsewhere in the application
             database,
             #[cfg(feature = "nimiq-mempool")]
             mempool,
-            validator,
+            validator: _,
         } = config_file;
 
         let NetworkSettings {

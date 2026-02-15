@@ -1,204 +1,232 @@
-  <a id="README" href="#README" href="https://github.com/nimiq/core-rs-albatross/blob/albatross/README.md">
-    <img src="https://raw.githubusercontent.com/nimiq/developer-center/refs/heads/main/assets/images/logos/albatross-repo-logo.svg" alt="Nimiq PoS Albatross Repository" width="600" />
-  </a>
-<br/>
-<br/>
+# Nimiq Lightweight History Node
 
-[![Build Status](https://github.com/nimiq/core-rs-albatross/actions/workflows/build+test.yml/badge.svg?branch=albatross)](https://github.com/nimiq/core-rs-albatross/actions/workflows/build+test.yml?query=branch%3Aalbatross)
-[![dependency status](https://deps.rs/repo/github/nimiq/core-rs-albatross/status.svg)](https://deps.rs/repo/github/nimiq/core-rs-albatross)
+A stripped-down fork of [nimiq/core-rs-albatross](https://github.com/nimiq/core-rs-albatross) that runs as a dedicated **read-only history node**. It syncs the full blockchain and exposes only 11 RPC methods for querying accounts, transactions, and blocks.
 
-[Nimiq](https://nimiq.com/) is a frictionless payment protocol for the web.
-
-This repository contains the Rust implementation of the Nimiq Proof-of-Stake protocol based on the Albatross consensus algorithm. It is designed to deliver high performance without sacrificing security. The Mainnet is now fully operational and ready for live transactions. It has been rigorously tested and is ready for production use.
-
-For the Testnet use and more detailed information on how to connect and use the network, please refer to the [Testnet](#testnet) section.
+This is not a general-purpose Nimiq node. It cannot produce blocks, relay transactions, or manage wallets.
 
 ---
 
 ### Table of Contents
-- [Reference](#reference)
-- [Hardware Requirements](#hardware-requirements-per-node-type)
+- [Supported RPC Methods](#supported-rpc-methods)
+- [Hardware Requirements](#hardware-requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
-- [History Nodes](#history-nodes)
-- [Service Nodes Guides](#service-nodes-guides)
-- [Docker](#docker)
-- [Testnet](#testnet)
-- [Software Integrity and Authenticity](#software-integrity-and-authenticity)
-- [Contributing](#contributing)
+- [Running](#running)
+- [Example RPC Calls](#example-rpc-calls)
+- [Differences from Official Repository](#differences-from-official-repository)
+- [History Nodes First Start](#history-nodes-first-start)
 - [License](#license)
 
-### Reference
+## Supported RPC Methods
 
-- [Nimiq Proof-of-Stake Portal](https://www.nimiq.com/albatross/): General information and high level details of the Nimiq Proof-of-Stake blockchain.
-- [Nimiq Albatross White Paper](https://arxiv.org/abs/1903.01589): White paper describing the consensus algorithm used in Nimiq Proof-of-Stake.
-- [Nimiq Developer Center](https://www.nimiq.com/developers/): The place for all the developer documentation and protocol design implementation.
-- [JSON-RPC Specification](https://www.nimiq.com/developers/build/set-up-your-own-node/rpc-docs/): Documentation for interacting with the network using JSON-RPC.
-- [Nimiq Proof-of-Stake Migration Technicalities](https://www.nimiq.com/developers/migration/migration-technical-details): Migration process to Nimiq Proof-of-Stake.
-- [Migration for Integrators](https://www.nimiq.com/developers/migration/migration-integrators): A guide for those who want a more in depth overview of the transitioning process from Proof-of-Work to Proof-of-Stake.
-- [Blockchain Explorer](https://nimiq.watch/): Block Explorer for the Mainnet.
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `getBlockNumber` | none | Returns the current block height |
+| `getBatchNumber` | none | Returns the current batch number |
+| `getBlockByNumber` | `blockNumber`, `includeTransactions` | Returns a block by its number |
+| `getAccountByAddress` | `address` | Returns account state for an address |
+| `getTransactionByHash` | `hash` | Returns a transaction by its hash |
+| `getTransactionsByAddress` | `address`, `max`, `startAt` | Returns transactions for an address (paginated) |
+| `getTransactionsByBlockNumber` | `blockNumber` | Returns transactions in a given block |
+| `getTransactionsByBatchNumber` | `batchNumber` | Returns transactions in a given batch |
+| `isConsensusEstablished` | none | Returns whether consensus is established |
+| `subscribeForHeadBlock` | none | WebSocket subscription — streams full blocks on head changes |
+| `subscribeForHeadBlockHash` | none | WebSocket subscription — streams block hashes on head changes |
 
-## Hardware Requirements per Node Type
+All other RPC methods are rejected by the server.
 
-| PoS Node Type | Memory | CPU | Storage | Network | Syncing Time |
-| --- | --- | --- | --- | --- | --- |
-| **History** (check additional [instructions](#history-nodes)) | Minimum 16GB RAM (higher recommended) | Minimum 4 vCPUs, 8 recommended | Minimum 1TB of storage (2TB when enabling indexing); storage usage starts at a few gigabytes and grows linearly with blockchain size over time | High-speed, reliable internet connection; Good I/O performance (SSDs required) | Sync time increases over the life of the blockchain |
-| **Full** | Minimum 16GB RAM | 4 vCPUs recommended | Minimum Minimum 60GB of storage | High-speed, reliable internet connection; Good I/O performance (SSDs recommended) | Sync time grows linearly but slowly |
-| **Light** | Minimum 4GB RAM | 64-bit recommended | Works with minimal storage | Moderate-speed internet connection (1 Mbps or higher) | Syncs in a few seconds |
+## Hardware Requirements
 
-#### Additional Recommendations:
-- File System: Ensure support for sparse files.
-- Clock Synchronization: Use a protocol like NTP for accurate block acceptance, which is essential for validators to produce blocks on time.
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| Memory | 16 GB RAM | Higher recommended |
+| CPU | 4 vCPUs | 8 vCPUs |
+| Storage | 1 TB (2 TB with indexing) | SSD required |
+| Network | High-speed, reliable connection | Good I/O performance |
 
-### Service Nodes Additional Requirements
-Nimiq has also two specific node types with specialized roles in maintaining the network security and performing more advanced tasks.
-
-- **Validators** for block production:
-    - **PoS Node Type**: Full or History
-    - **Memory**: 16GB RAM minimum
-    - **CPU**: 4 vCPUs recommended
-
-- **Prover nodes** for zero-knowledge proof generation:
-    - **PoS Node Type**: Full or History
-    - **Memory**: 64GB RAM minimum
-    - **CPU**: 8vCPUs recommended
+Storage usage starts at a few gigabytes and grows linearly with blockchain size over time. This fork reduces storage compared to the official history node by pruning MMR proof data and disabling the validity store.
 
 ## Installation
 
-1. Install the latest version of Rust by following  the instructions on the [Rust website](https://www.rust-lang.org/learn/get-started#installing-rust) and following packages to be able to compile the source code:
-    - `clang`
-    - `cmake`
-    - `libssl-dev` (in Debian/Ubuntu) or `openssl-devel` (in Fedora/Red Hat)
-    - `pkg-config` 
+1. Install Rust 1.88.0 or later from [rustup.rs](https://rustup.rs/) and the following system packages:
+   - `clang`
+   - `cmake`
+   - `libssl-dev` (Debian/Ubuntu) or `openssl-devel` (Fedora/Red Hat)
+   - `pkg-config`
 
-We currently do not make any guarantees about the minimum supported Rust version to consumers, but we currently test two versions older than the current Rust stable.
-
-2. Clone the core-rs repository and compile the project with `cargo`:
+2. Clone and build:
 ```bash
-git clone https://github.com/nimiq/core-rs-albatross
+git clone <this-repo-url>
 cd core-rs-albatross
-cargo build --release
+cargo build -p nimiq-client --release
 ```
 
-3. Install the client onto your system (into `$HOME/.cargo/bin`) with:
+The binary is at `target/release/nimiq-client`.
+
+You can also run directly without installing:
+```bash
+cargo run --release --bin nimiq-client
+```
+
+3. Optionally install system-wide:
 ```bash
 cargo install --path client/
 ```
 
-Alternatively, you can install it directly from git:
+## Configuration
 
-```bash
-cargo install --git https://github.com/nimiq/core-rs-albatross.git
+Create a TOML config file (e.g. `client.toml`). You can start from the [example config](lib/src/config/config_file/client.example.toml).
+
+Key settings for this fork:
+
+```toml
+[consensus]
+network = "main-albatross"    # or "test-albatross"
+sync_mode = "history"         # Required — must be "history"
+index_history = true          # Required for getTransactionsByAddress
+
+[database]
+path = "./db"
+
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/8443/ws"]
+
+[rpc-server]
+bind = "127.0.0.1"
+port = 8648
+# cors_domains = ["*"]       # Optional: allow CORS from any origin
+# username = "user"          # Optional: basic auth
+# password = "pass"
+
+[log]
+level = "info"
+timestamps = true
+statistics = 10               # Log peer/block stats every N seconds (0 = disable)
 ```
 
-### Configuration
-You need a configuration file to customize your node according to your specific requirements. Follow one of the methods below to create and edit your configuration file.
+### Required settings
 
-**Option A**
-The configuration file is generated automatically and in a specific location.
-1. Generate the configuration file with the following command:
+- **`sync_mode = "history"`** — the node must sync in history mode to store transaction data.
+- **`index_history = true`** (under `[consensus]`) — enables the address-to-transaction index needed by `getTransactionsByAddress`.
+
+### Port configuration
+
+Ensure your firewall allows traffic on port **8443/tcp** (P2P) and **8648/tcp** (RPC).
+
+## Running
+
 ```bash
+# With default config location (~/.nimiq/client.toml)
+./target/release/nimiq-client
+
+# With explicit config file
+./target/release/nimiq-client --config client.toml
+
+# Or run directly via cargo
 cargo run --release --bin nimiq-client
+cargo run --release --bin nimiq-client -- --config client.toml
 ```
-This generates a sample file and places it in a folder `./nimiq`.
 
-2. Copy the sample configuration file into a new file in the same directory where you will edit it according to your needs:
+The node connects to the network, syncs the blockchain, and starts serving RPC requests once synced.
+
+## Example RPC Calls
+
 ```bash
-cp $HOME/.nimiq/client.example.toml $HOME/.nimiq/client.toml 
+# Get current block number
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getBlockNumber","params":[],"id":1}'
+
+# Get block by number (with transactions)
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getBlockByNumber","params":[100, true],"id":2}'
+
+# Get account by address
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getAccountByAddress","params":["NQ07 0000 0000 0000 0000 0000 0000 0000 0000"],"id":3}'
+
+# Get transaction by hash
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getTransactionByHash","params":["abcdef1234..."],"id":4}'
+
+# Get transactions by address (paginated, max 100)
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getTransactionsByAddress","params":["NQ07 0000 0000 0000 0000 0000 0000 0000 0000", 100],"id":5}'
+
+# Get transactions by block number
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getTransactionsByBlockNumber","params":[100],"id":6}'
+
+# Get transactions by batch number
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getTransactionsByBatchNumber","params":[1],"id":7}'
+
+# Get current batch number
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"getBatchNumber","params":[],"id":8}'
+
+# Check if consensus is established
+curl -s -X POST http://127.0.0.1:8648 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"isConsensusEstablished","params":[],"id":9}'
 ```
-3. Edit your configuration file following the explanations inside. Refer to the [configuration settings](https://github.com/nimiq/core-rs-albatross/blob/albatross/lib/src/config/config_file/client.example.toml) for guidance.
-4. Run the client:
-```bash
-cargo run --release --bin nimiq-client
-```
-By default, the client will look for the config file in `$HOME/.nimiq/client.toml`.
 
-**Option B**
-Download the example file and manually place it.
-1. Copy this [sample configuration file](https://github.com/nimiq/core-rs-albatross/blob/albatross/lib/src/config/config_file/client.example.toml) to your preferred location.
-2. Edit the configuration file and adjust settings as needed. Refer to the **sample configuration file** for guidance.
-3. Run the client with the specified file:
-```bash
-cargo run --release --bin nimiq-client -- -c path/to/client.toml
-```
+## Differences from Official Repository
 
-Now your client is launched and running.
+| Feature | Official | This Fork |
+|---------|----------|-----------|
+| Block production (validator) | Yes | Removed |
+| Transaction mempool | Yes | Removed |
+| Wallet management | Yes | Removed |
+| Metrics server (Prometheus) | Yes | Removed |
+| Eth-compatible RPC | Yes | Removed |
+| Full RPC API (~30 methods) | Yes | 11 methods only |
+| ZKP prover | Yes | Removed (verifier only) |
+| ValidityStore (replay protection) | Active | Disabled |
+| MMR proof storage | Persistent | Pruned after epoch finalization |
+| Sync modes | Full, Light, History | History only |
 
-**Port Configuration**
-Assuming you didn't change the default listening port, ensure that your system allows network traffic through port **8443/tcp**. Open this port in your firewall to allow the node to connect to the network.
+### Storage optimizations
 
-### History Nodes
-For the first start of your history node, you must set the environment variable `NIMIQ_OVERRIDE_MAINNET_CONFIG` to point to a configuration file. This file can be downloaded from one of the following sources:
+1. **ValidityStore disabled** — the validity window tracker (used by the mempool for replay prevention) is not written to. Saves 2 database tables.
+2. **Post-epoch MMR pruning** — Merkle Mountain Range proof nodes are deleted after each epoch is finalized. Transaction data is kept for RPC queries; only proof nodes (used for generating inclusion proofs) are discarded.
+3. **zstd compression** — `HistoricTransaction`, `Block`, and `MicroBlock` values are zstd-compressed before writing to MDBX. A magic byte prefix (`0xFF`) distinguishes compressed from uncompressed data, providing backward compatibility with existing databases. Values smaller than 64 bytes are stored uncompressed.
 
-- **Nimiq IPFS gateway link**: https://ipfs.nimiq.io/ipfs/QmWcRRRw4FaKRrznMFt6KemAM35uo9QknMkDaeBzTod33R
+### Removed crates/modules
+
+- `rpc-server/src/dispatchers/` — all dispatchers except `blockchain` removed
+- `rpc-server/src/eth_interface/` — entire Eth-compatible interface removed
+- `rpc-server/src/wallets.rs` — wallet store removed
+- `rpc-interface/` — only `blockchain` interface module kept
+
+### Removed nimiq-lib features
+
+`validator`, `wallet`, `metrics-server`, `zkp-prover`, `parallel`
+
+## History Nodes First Start
+
+For the first start of a history node on **mainnet**, you must set the environment variable `NIMIQ_OVERRIDE_MAINNET_CONFIG` to point to a genesis configuration file. This file can be downloaded from:
+
+- **Nimiq IPFS gateway**: https://ipfs.nimiq.io/ipfs/QmWcRRRw4FaKRrznMFt6KemAM35uo9QknMkDaeBzTod33R
 - **Via torrent**:
-    
     ```
     magnet:?xt=urn:btih:566cec0c350fca917cf5abb00c7dbe8c70884306&dn=nimiq-genesis-main-albatross.toml&tr=https%3A%2F%2Ftorrents.nimiq.io%2Fannounce
     ```
-    
 
-After downloading the file, run `NIMIQ_OVERRIDE_MAINNET_CONFIG=/path/to/nimiq-genesis-main-albatross.toml cargo run --release --bin nimiq-client` with the actual path to the file.
-
-This process is required **only for the first start** of the history node. For later restarts, neither the environment variable nor the file are needed. You can even delete the file after the initial setup.
-
-### Service Nodes Guides
-You can also choose to run a validator or a prover node. Check our guides with the full step-by-step description:
-- [Validators](https://www.nimiq.com/developers/build/set-up-your-own-node/becoming-a-validator)
-- [Prover nodes](https://www.nimiq.com/developers/build/set-up-your-own-node/prover-node-guide)
-
-## Docker
-
-1. Create a `data` folder in the main directory with `mkdir ~/data`.
-2. Pull the latest image from the container registry:
-`docker pull ghcr.io/nimiq/core-rs-albatross:latest`.
-3. Create a `client.toml` file in `~/data` with `cp ./lib/src/config/config_file/client.example.toml ~/data/client.toml`.
-4. Customize the configuration file to match your requirements. Refer to the [sample configuration file](https://github.com/nimiq/core-rs-albatross/blob/albatross/lib/src/config/config_file/client.example.toml) and [configuration settings](#configuration) for guidance.
-5. Run the client via Docker.
-   - If you are running a history node for **mainnet**:
-     1. Make sure to have downloaded the full genesis file as explained in [this section](#history-nodes).
-     2. Copy the full genesis file into the `data` folder: `cp /path/to/nimiq-genesis-main-albatross.toml ~/data`.
-     3. Run the client with the `NIMIQ_OVERRIDE_MAINNET_CONFIG` environment variable:
-        ```
-        docker run -v $(pwd)/data:/home/nimiq/.nimiq -p 8443:8443 -p 8648:8648 -p 9100:9100 -e NIMIQ_OVERRIDE_MAINNET_CONFIG=/home/nimiq/.nimiq/nimiq-genesis-main-albatross.toml --name nimiq-rpc --rm ghcr.io/nimiq/core-rs-albatross:latest
-        ```
-   - If you're not running a history node or not running the client for **mainnet**:
-     ```
-     docker run -v $(pwd)/data:/home/nimiq/.nimiq -p 8443:8443 -p 8648:8648 -p 9100:9100 --name nimiq-rpc --rm ghcr.io/nimiq/core-rs-albatross:latest
-     ```
-
-**Overview of Exposed Ports**
-
-| Port | Description |
-| --- | --- |
-| 8443 | Incoming network connections port |
-| 8648 | RPC port |
-| 9100 | Metrics port |
-
-## Testnet
-The Testnet network is publicly available for testing and experimentation. Its main purpose is to invite everyone to exercise and test the Nimiq Proof-of-Stake functionality and we invite people to file and report any [issues](https://github.com/nimiq/core-rs-albatross/issues/new) through our GitHub repository.
-
-You can use the Testnet by setting the [consensus.network](https://github.com/nimiq/core-rs-albatross/blob/a61a230915726261874163e94fdf81ee9c253404/lib/src/config/config_file/client.example.toml#L121) in your configuration file set to `test-albatross`. Additionally uncomment the [network.seed_nodes](https://github.com/nimiq/core-rs-albatross/blob/b8ed402c9096ffb54afea52347b91ab7831e75de/lib/src/config/config_file/client.example.toml#L29) for the Testnet and comment the Mainnet ones.
-
-#### Getting funds
-
-There are two ways of getting funds:
-
-- Using an account in the [Testnet Nimiq Wallet](https://wallet.pos.nimiq-testnet.com/) and requesting funds in the wallet.
-- Directly using the [Testnet Faucet](https://faucet.pos.nimiq-testnet.com/):
-
-```
-curl -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "address=NQXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX" https://faucet.pos.nimiq-testnet.com/tapit
+Run:
+```bash
+NIMIQ_OVERRIDE_MAINNET_CONFIG=/path/to/nimiq-genesis-main-albatross.toml \
+  cargo run --release -p nimiq-client
 ```
 
-## Software Integrity and Authenticity
-To ensure the software you are running is authentic and has not been tampered with, refer to the [documentation](https://github.com/nimiq/core-rs-albatross/blob/albatross/build/README.md). It provides details on reproducing Nimiq software and verifying software signatures.
-
-## Contributing
-
-If you'd like to contribute to the development of Nimiq please follow our [Code of Conduct](/.github/CODE_OF_CONDUCT.md)
-and [Contributing Guidelines](/.github/CONTRIBUTING.md).
-Small note: When editing the README, please conform to the [standard-readme](https://github.com/RichardLitt/standard-readme) specification.
+This is required **only for the first start**. Subsequent restarts don't need the file or environment variable.
 
 ## License
 

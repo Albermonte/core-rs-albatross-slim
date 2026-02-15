@@ -38,6 +38,10 @@ pub trait HistoryInterface: Debug {
     /// Removes the full history associated with a given epoch.
     fn remove_history(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32) -> Option<()>;
 
+    /// Removes only the MMR tree data for a given epoch, keeping transaction data intact.
+    /// This saves storage for finalized epochs where proofs are no longer needed.
+    fn remove_history_tree(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32);
+
     /// Obtains the current history root at the given block.
     fn get_history_tree_root(
         &self,

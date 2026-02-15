@@ -42,4 +42,4 @@ nimiq-utils = { workspace = true }
 
 [dependencies.nimiq]
 workspace = true
-features = [ "database-storage", "deadlock", "full-consensus", "logging", "metrics-server", "panic", "rpc-server", "signal-handling", "tokio-websocket", "validator", "wallet"]
+features = [ "database-storage", "deadlock", "full-consensus", "logging", "panic", "rpc-server", "signal-handling", "tokio-websocket"]

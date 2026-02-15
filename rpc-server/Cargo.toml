@@ -22,32 +22,21 @@ workspace = true
 [dependencies]
 async-trait = "0.1"
 futures = { workspace = true }
-hex = "0.4.2"
-log = { workspace = true }
-parking_lot = "0.12"
 serde = "1.0"
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = "1.49"
+tokio = { version = "1.49", features = ["rt"] }
 tokio-stream = "0.1"
 
 nimiq-account = { workspace = true }
-nimiq-block = { workspace = true }
 nimiq-blockchain = { workspace = true }
 nimiq-blockchain-interface = { workspace = true }
 nimiq-blockchain-proxy = { workspace = true, features = ["full"] }
-nimiq-bls = { workspace = true, features = ["serde-derive"] }
-nimiq-collections = { workspace = true }
-nimiq-consensus = { workspace = true, features = ["full"] }
-nimiq-database = { workspace = true }
 nimiq-hash = { workspace = true }
 nimiq-jsonrpc-core = { workspace = true }
 nimiq-jsonrpc-derive = { workspace = true }
 nimiq-jsonrpc-server = { workspace = true }
 nimiq-keys = { workspace = true, features = ["serde-derive"] }
-nimiq-mempool = { workspace = true }
-nimiq-network-interface = { workspace = true }
-nimiq-network-libp2p = { workspace = true }
 nimiq-primitives = { workspace = true, features = [
     "coin",
     "account",
@@ -55,13 +44,3 @@ nimiq-primitives = { workspace = true, features = [
 ] }
 nimiq-rpc-interface = { workspace = true }
 nimiq-serde = { workspace = true }
-nimiq-transaction = { workspace = true }
-nimiq-transaction-builder = { workspace = true, features = [
-    "serde-derive",
-] }
-nimiq-utils = { workspace = true, features = ["otp"] }
-nimiq-validator = { workspace = true }
-nimiq-validator-network = { workspace = true }
-nimiq-vrf = { workspace = true, features = ["serde-derive"] }
-nimiq-wallet = { workspace = true, features = ["store"] }
-nimiq-zkp-component = { workspace = true }

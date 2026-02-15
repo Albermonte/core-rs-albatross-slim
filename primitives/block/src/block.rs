@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
-use nimiq_database_value_derive::DbSerializable;
+use nimiq_database_value::{AsDatabaseBytes, FromDatabaseBytes, IntoDatabaseValue};
 use nimiq_hash::{Blake2bHash, Blake2sHash, Hash};
 use nimiq_keys::Ed25519PublicKey;
 use nimiq_primitives::{
@@ -33,12 +33,35 @@ impl BlockType {
 
 /// The enum representing a block. Blocks can either be Micro blocks or Macro blocks (which includes
 /// both checkpoint and election blocks).
-#[derive(
-    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize, DbSerializable,
-)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize)]
 pub enum Block {
     Macro(MacroBlock),
     Micro(MicroBlock),
+}
+
+impl AsDatabaseBytes for Block {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
+        let raw = Serialize::serialize_to_vec(self);
+        Cow::Owned(nimiq_database_value::compressed::compress(&raw))
+    }
+}
+
+impl FromDatabaseBytes for Block {
+    fn from_key_bytes(bytes: &[u8]) -> Self {
+        let decompressed = nimiq_database_value::compressed::decompress(bytes);
+        Deserialize::deserialize_from_vec(&decompressed).unwrap()
+    }
+}
+
+impl IntoDatabaseValue for Block {
+    fn database_byte_size(&self) -> usize {
+        self.as_key_bytes().len()
+    }
+
+    fn copy_into_database(&self, bytes: &mut [u8]) {
+        let compressed = self.as_key_bytes();
+        bytes[..compressed.len()].copy_from_slice(&compressed);
+    }
 }
 
 impl Block {

@@ -1,11 +1,15 @@
 ##############################################################################
 #
-#   Nimiq core-rs-albatross example configuration file
+#   Nimiq Lightweight History Node — example configuration file
 #
 #   Copy this to client.toml and edit appropriately.
 #
 #   The client will look for this config file in '$HOME/.nimiq'
 #   if not specified with the --config option.
+#
+#   This fork exposes only 5 RPC methods:
+#     getBlockNumber, getBlockByNumber, getAccountByAddress,
+#     getTransactionByHash, getTransactionsByAddress
 #
 ##############################################################################
 
@@ -15,16 +19,13 @@
 
 [network]
 
-# The local multiaddresses this node should bind to. Usually these are loopback addresses.
-# Multiple addresses can be specified.
-#
-# If `advertised_addresses` is not used, these addresses will also be advertised to peers.
+# The local multiaddresses this node should bind to.
 listen_addresses = [
   "/ip4/0.0.0.0/tcp/8443/ws",
   "/ip6/::/tcp/8443/ws",
 ]
 
-# Seed nodes to connect to when the node starts up. Multiple addresses can be specified.
+# Seed nodes to connect to when the node starts up.
 # - Testnet seed nodes (uncomment the following lines and comment mainnet ones for Testnet):
 # seed_nodes = [
 #   { address = "/dns4/seed1.pos.nimiq-testnet.com/tcp/8443/wss" },
@@ -51,28 +52,21 @@ seed_nodes = [
 ]
 
 # Address(es) that will be advertised to peers instead of the ones in `listen_addresses`.
-#
-# This can be used to advertise the public URL and port that peers should connect to, while
-# `listen_addresses` contains the loopback IP and port that this nodes listens on, which may
-# not be publicly reachable.
-# For validators it is a necessity to have a publicly reachable IP or hostname in order to be operative.
 # Default: []
 #advertised_addresses = [
 #  "/ip4/my.ip/tcp/8443/ws",
 #  "/dns4/my.public.domain.com/tcp/8443/wss",
 #]
 
-# User Agent string that describes what kind of node is running.
-#
+# User Agent string.
 # Default: Generated from version, operating system and processor architecture
 #user_agent = "core-rs-albatross/0.1.0 (native; linux x86_64)"
 
-# If the node should try to connect to loopback addresses, which are usually not reachable
-# from the public internet. This setting is useful for testing inside a local (Docker) network.
+# Allow connections to loopback addresses (useful for local/Docker testing).
 # Default: false
 #allow_loopback_addresses = false
 
-# The desired number of peer connections the network should try to maintain.
+# The desired number of peer connections.
 # Default: 12
 #desired_peer_count = 12
 
@@ -80,47 +74,9 @@ seed_nodes = [
 # Default: "~/.nimiq/peer_key.dat"
 #peer_key_file = "path/to/peer_key.dat"
 
-# The peer key to use. This must be an Ed25519 keypair in hex format.
-# Only used when the `peer_key_file` does not exist.
+# The peer key to use (Ed25519 keypair in hex). Only used when peer_key_file does not exist.
 # Default: randomly generated
 #peer_key = ""
-
-# The max number of peer connections the network allows.
-# Default: 4000
-#peer_count_max = 4000
-
-# The max number of peer connections per IP address the network allows.
-# Default: 20
-#peer_count_per_ip_max = 20
-
-# The max number of peer connections per subnet IP address the network allows.
-# Default: 20
-#peer_count_per_subnet_max = 20
-
-# The amount of connections initially attempted at startup. 
-# This must be a number bigger than 0 or no connections at all will be attempted.
-# The default is one more than the default of consensus.min_peers.
-# Default: 4 
-#num_initial_connections = 4
-
-# Network requests buffer size
-# The buffer size in number of messages for different network requests
-# Default: 1024
-#network_buffer_size = 1024
-
-
-##############################################################################
-#
-# TLS network configuration:
-# - Path to private key file (PEM-encoded ASN.1 in either PKCS#8 or PKCS#1 format)
-# - Path to a certificate or fullchain file (PEM-encoded X.509 format)
-#
-# Usually, PEM files from SSL providers like Let's Encrypt can be used as-is.
-#
-##############################################################################
-#[network.tls]
-#private_key = "./path/to/private_key.pem"
-#certificates = "./path/to/certificate.pem"
 
 ##############################################################################
 # Consensus configuration
@@ -132,28 +88,17 @@ seed_nodes = [
 # Default: "main-albatross"
 network = "main-albatross"
 
-# The sync mode, which determines the client type.
-# Validator nodes require "full" or "history" sync mode.
-# Possible values: "history", "full", "light"
+# The sync mode. This fork only supports "history".
 # Default: "history"
-sync_mode = "full"
+sync_mode = "history"
 
-# The number of epochs that the node stores. This only concerns nodes with "full" sync mode.
-# Default: 1
-#max_epochs_stored = 1
+# Enable transaction indexing (required for getTransactionsByAddress).
+# Default: true when sync_mode is "history"
+index_history = true
 
 # The number of synced peers required to establish consensus.
 # Default: 3
 #min_peers = 3
-
-# The minimum distance away, in number of blocks, from the head to switch from state sync to live sync.
-# This property only has an effect when the sync_mode is "full"
-# Default: 10800 (3 hours worth of blocks)
-#full_sync_threshold = 10800
-
-# Enable or disable transaction indexing for history and full nodes.
-# Default: true when the sync_mode is "history" and false when the sync_mode is "full".
-#index_history = true
 
 ##############################################################################
 # Database configuration
@@ -177,20 +122,12 @@ sync_mode = "full"
 #max_readers = 600
 
 ##############################################################################
-# ZK Prover configuration
-#
-# If the section header is uncommented, the prover is enabled.
-##############################################################################
-#[zk-prover]
-
-# The path for the proving keys folder.
-# Default: ".zkp"
-#prover_keys_path = "path/to/folder"
-
-##############################################################################
 # JSON-RPC server configuration
 #
 # If the section header is uncommented, the server is enabled.
+# Only 5 methods are available in this fork (all others are rejected):
+#   getBlockNumber, getBlockByNumber, getAccountByAddress,
+#   getTransactionByHash, getTransactionsByAddress
 ##############################################################################
 [rpc-server]
 
@@ -202,15 +139,6 @@ sync_mode = "full"
 # Default: 8648
 #port = 8648
 
-# Allow only the RPC methods listed here. All methods are allowed if this is empty.
-# Example: ["getBlockByNumber", "getPeerCount"],
-# Default: []
-#methods = []
-
-# Allow connections only from the IP addresses listed here. All IP addresses are allowed if this is empty.
-# Default: []
-#allowip = []
-
 # Declare a username and password required to access the JSON-RPC server.
 # Default: none
 #username = "super"
@@ -221,28 +149,7 @@ sync_mode = "full"
 # Example: ["*"]
 # Example: ["https://nimiq.com", "https://github.com"]
 # Default: []
-# cors_domains = []
-
-##############################################################################
-# Metrics-server configuration.
-#
-# If the section header is uncommented, the server is enabled.
-##############################################################################
-[metrics-server]
-
-# Bind the metrics server to the specified IP.
-# Default: 127.0.0.1
-#bind = "127.0.0.1"
-
-# Port to use to create a listening socket for the metrics server.
-# Default: 9100
-#port = 9100
-
-# Declare a username and password required to access the metrics server.
-# Default: none
-#username = "super"
-# Default: none
-#password = "secret"
+#cors_domains = []
 
 ##############################################################################
 # Log output configuration
@@ -252,7 +159,7 @@ sync_mode = "full"
 # The global log level.
 # Possible values: "trace", "debug", "info", "warn", "error"
 # Default: "info"
-level = "debug"
+level = "info"
 
 # Individual log levels for specific tags.
 # Default: none
@@ -269,121 +176,3 @@ level = "debug"
 # Save log output to a file. If not specified, logs to stderr.
 # Default: none
 #file = "nimiq-client.log"
-
-# Tokio console.
-# Default: None
-#tokio_console_bind_address = "127.0.0.1:6669"
-
-# Loki target
-#[log.loki]
-
-# Loki server address.
-# Default: None
-#url = "http://localhost:3100"
-
-# Labels set on the log messages. There should only be a finite amount of
-# different label values, and ideally very few labels. See the Loki
-# documentation for details.
-#labels = { host = "mine" }
-
-# Extra fields added to each log message (e.g. to distinguish runs).
-#extra_fields = { run = "e2f8e044-0067-4902-914f-261b7f500ba7" }
-
-##############################################################################
-# Configure log output for the prover process.
-#
-# This section offers the same options as the [log] section.
-##############################################################################
-
-#[prover-log]
-
-# The prover log level.
-# Possible values: "trace", "debug", "info", "warn", "error"
-# Default: "info"
-#level = "debug"
-
-##############################################################################
-# Mempool configuration
-###############################################################################
-[mempool]
-
-# Total size limit for transactions in the mempool, in bytes.
-# Default: 12_000_000 (~ 100_000 basic tx)
-#size_limit = 12_000_000
-
-# Total size limit for control transactions in the mempool, in bytes.
-# Default: 6_000_000
-#control_size_limit = 6_000_000
-
-# Maximum size of the transaction black list.
-# Default: 25000
-#blacklist_limit = 25000
-
-# Rules to filter mempool transaction by.
-#[mempool.filter]
-
-# Minimum fee for all transactions.
-#tx_fee = 0
-# Minimum fee per byte for all transactions.
-#tx_fee_per_byte = 0
-# Minimum value for all transactions.
-#tx_value = 0
-# Minimum total value (value + fee) for all transactions.
-#tx_value_total = 0
-# Minimum fee for transactions creating a contract.
-#contract_fee = 0
-# Minimum fee per byte for transactions creating a contract.
-#contract_fee_per_byte = 0
-# Minimum value for transactions creating a contract.
-#contract_value = 0
-# Minimum fee for transactions creating a new account.
-#creation_fee = 0
-# Minimum fee per byte for transactions creating a new account.
-#creation_fee_per_byte = 0
-# Minimum value for transactions creating a new account.
-#creation_value = 0
-# Minimum balance that the recipient account must have after the transaction.
-#sender_balance = 0
-# Minimum balance that must remain on the sender account after the transaction, if not zero.
-#recipient_balance = 0
-
-##############################################################################
-# Validator configuration
-#
-# If the section header is uncommented, validator mode is enabled.
-###############################################################################
-#[validator]
-
-# The address of the validator.
-#validator_address = "NQ07 0000 0000 0000 0000 0000 0000 0000 0000"
-
-# Whether to automatically create and send reactivation transactions when the validator becomes inactive.
-# Default: false
-#automatic_reactivate = true
-
-# Where to store the validator signing key.
-# Default: "~/.nimiq/signing_key.dat"
-#signing_key_file = "signing_key.dat"
-
-# The validator signing key. This must be an Ed25519 private key in hex format.
-# Only used when the `signing_key_file` does not exist.
-# Default: randomly generated
-#signing_key = ""
-
-# Locations of voting keys.
-# Multiple paths can be provided in case a key-rotation is planned.
-#voting_key_files = [ "voting_key.dat" ]
-
-# The validator voting key. This must be a BLS private key in hex format.
-# Only used when `voting_key_files` does not exist.
-# Default: randomly generated
-#voting_key = ""
-
-# Where to store the validator fee key.
-# Default: "~/.nimiq/fee_key.dat"
-#fee_key_file = "fee_key.dat"
-
-# The validator fee key. This must be an Ed25519 private key in hex format.
-# Only used when the `fee_key_file` does not exist.
-# Default: randomly generated
-#fee_key = ""

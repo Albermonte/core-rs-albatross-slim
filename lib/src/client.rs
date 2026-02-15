@@ -22,10 +22,6 @@ use nimiq_dht::Verifier;
 use nimiq_genesis::NetworkId;
 use nimiq_genesis::NetworkInfo;
 use nimiq_light_blockchain::LightBlockchain;
-#[cfg(feature = "validator")]
-use nimiq_mempool::mempool::Mempool;
-#[cfg(feature = "validator")]
-use nimiq_mempool_task::MempoolTask as AbstractMempoolTask;
 use nimiq_network_interface::{
     network::Network as NetworkInterface,
     peer_info::{NodeType, Services},
@@ -38,16 +34,6 @@ use nimiq_network_libp2p::{
 use nimiq_primitives::policy::Policy;
 #[cfg(feature = "full-consensus")]
 use nimiq_utils::time::OffsetTime;
-#[cfg(feature = "validator")]
-use nimiq_validator::key_utils::VotingKeys;
-#[cfg(feature = "validator")]
-use nimiq_validator::validator::Validator as AbstractValidator;
-#[cfg(feature = "validator")]
-use nimiq_validator::validator::ValidatorState as AbstractValidatorState;
-#[cfg(feature = "validator")]
-use nimiq_validator_network::network_impl::ValidatorNetworkImpl;
-#[cfg(feature = "wallet")]
-use nimiq_wallet::WalletStore;
 use nimiq_zkp::ZKP_VERIFYING_DATA;
 #[cfg(feature = "zkp-prover")]
 use nimiq_zkp_circuits::setup::{all_files_created, load_verifying_data, setup, DEVELOPMENT_SEED};
@@ -73,31 +59,12 @@ use crate::{
 /// Alias for the Consensus and Validator specialized over libp2p network
 pub type Consensus = AbstractConsensus<Network>;
 pub type ConsensusProxy = AbstractConsensusProxy<Network>;
-#[cfg(feature = "validator")]
-pub type Validator = AbstractValidator<ValidatorNetworkImpl<Network>>;
-#[cfg(feature = "validator")]
-pub type ValidatorState = AbstractValidatorState;
 
 pub type ZKPComponent = AbstractZKPComponent<Network>;
 pub type ZKPComponentProxy = AbstractZKPComponentProxy<Network>;
 
-#[cfg(feature = "validator")]
-pub type MempoolTask = AbstractMempoolTask<Network>;
-
-#[cfg(feature = "validator")]
-pub enum ValidatorOrMempool {
-    Validator(Validator),
-    Mempool(MempoolTask),
-}
-
 /// Holds references to the relevant structs. This is then Arc'd in `Client` and a nice API is
 /// exposed.
-///
-/// # TODO
-///
-/// * Move RPC server and Metrics server out of here
-/// * Move Validator out of here?
-///
 pub(crate) struct ClientInner {
     network: Arc<Network>,
 
@@ -106,13 +73,6 @@ pub(crate) struct ClientInner {
     consensus: ConsensusProxy,
 
     blockchain: BlockchainProxy,
-
-    #[cfg(feature = "validator")]
-    validator: Option<Arc<RwLock<ValidatorState>>>,
-
-    /// Wallet that stores key pairs for transaction signing
-    #[cfg(feature = "wallet")]
-    wallet_store: Arc<WalletStore>,
 
     zkp_component: ZKPComponentProxy,
 }
@@ -243,14 +203,8 @@ impl ClientInner {
             identity_keypair.public().to_peer_id().to_base58()
         );
 
-        let (mut provided_services, required_services) =
+        let (provided_services, required_services) =
             generate_service_flags(config.consensus.sync_mode, config.consensus.index_history);
-
-        // We update the services flags depending on our validator configuration
-        #[cfg(feature = "validator")]
-        if config.validator.is_some() {
-            provided_services |= Services::VALIDATOR;
-        }
 
         // Generate my peer contact from identity keypair, our own addresses
         // (from the configured advertised addresses) and my provided services
@@ -271,6 +225,8 @@ impl ClientInner {
         });
 
         // Set pre-genesis flag.
+        #[cfg(feature = "database-storage")]
+        let mut provided_services = provided_services;
         #[cfg(feature = "database-storage")]
         if config.storage.has_pre_genesis_database(config.network_id) {
             provided_services |= Services::PRE_GENESIS_TRANSACTIONS;
@@ -386,8 +342,10 @@ impl ClientInner {
         let bls_cache = Arc::new(Mutex::new(BlsCache::default()));
 
         #[cfg(feature = "full-consensus")]
-        let mut blockchain_config = BlockchainConfig {
+        let blockchain_config = BlockchainConfig {
             max_epochs_stored: config.consensus.max_epochs_stored,
+            keep_history: config.consensus.sync_mode == SyncMode::History,
+            index_history: config.consensus.index_history,
             ..Default::default()
         };
 
@@ -408,8 +366,6 @@ impl ClientInner {
             }
             #[cfg(feature = "full-consensus")]
             SyncMode::History | SyncMode::Full => {
-                blockchain_config.keep_history = config.consensus.sync_mode == SyncMode::History;
-                blockchain_config.index_history = config.consensus.index_history;
                 let blockchain = match Blockchain::new_merged(
                     environment.clone(),
                     pre_genesis_environment,
@@ -551,10 +507,6 @@ impl ClientInner {
             }
         };
 
-        // Open wallet
-        #[cfg(feature = "wallet")]
-        let wallet_store = Arc::new(WalletStore::new(environment.clone()));
-
         // Initialize consensus
         let consensus = Consensus::new(
             blockchain_proxy.clone(),
@@ -565,107 +517,6 @@ impl ClientInner {
             syncer_tracker,
         );
 
-        #[cfg(feature = "validator")]
-        let mut validator_or_mempool = None;
-
-        #[cfg(feature = "validator")]
-        let validator_state = match config.validator {
-            Some(validator_config) => {
-                if let BlockchainProxy::Full(ref blockchain) = blockchain_proxy {
-                    // Load validator address
-                    let validator_address = validator_config.validator_address;
-
-                    // Load validator address
-                    let automatic_reactivate = validator_config.automatic_reactivate;
-
-                    let dht_fallback_url = validator_config.dht_fallback_url;
-
-                    let dht_fallback = {
-                        #[cfg(feature = "dht-fallback")]
-                        {
-                            use futures::future::FutureExt as _;
-
-                            use crate::extras::dht_fallback::DhtFallback;
-                            let fallback = Arc::new(dht_fallback_url.and_then(DhtFallback::new));
-                            move |address| {
-                                let fallback = fallback.clone();
-                                async move {
-                                    if let Some(fallback) = &*fallback {
-                                        fallback.resolve(address).await
-                                    } else {
-                                        None
-                                    }
-                                }
-                                .boxed()
-                            }
-                        }
-                        #[cfg(not(feature = "dht-fallback"))]
-                        {
-                            assert!(
-                                dht_fallback_url.is_none(),
-                                "DHT fallback support not compiled in"
-                            );
-                            |_| future::ready(None).boxed()
-                        }
-                    };
-
-                    // Load signing key (before we give away ownership of the storage config)
-                    let signing_key = config.storage.signing_keypair()?;
-
-                    // Load validator key (before we give away ownership of the storage config)
-                    let voting_keys = VotingKeys::new(config.storage.voting_keypairs()?);
-
-                    // Load fee key (before we give away ownership of the storage config)
-                    let fee_key = config.storage.fee_keypair()?;
-
-                    let validator_network = Arc::new(ValidatorNetworkImpl::new_with_fallback(
-                        Arc::clone(&network),
-                        Arc::new(dht_fallback),
-                    ));
-
-                    let validator = Validator::new(
-                        environment.clone(),
-                        &consensus,
-                        Arc::clone(blockchain),
-                        validator_network,
-                        validator_address,
-                        automatic_reactivate,
-                        signing_key,
-                        voting_keys,
-                        fee_key,
-                        config.mempool.clone(),
-                    );
-
-                    // Use the validator's mempool as TransactionVerificationCache in the blockchain.
-                    blockchain.write().tx_verification_cache =
-                        Arc::<Mempool>::clone(&validator.mempool_task.mempool);
-
-                    let validator_state = Arc::clone(validator.state());
-                    validator_or_mempool = Some(ValidatorOrMempool::Validator(validator));
-                    Some(validator_state)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
-
-        // If this is a full/history node without validator,
-        // still initialize a mempool.
-        #[cfg(feature = "validator")]
-        if matches!(
-            config.consensus.sync_mode,
-            SyncMode::Full | SyncMode::History
-        ) && validator_or_mempool.is_none()
-            && let BlockchainProxy::Full(ref blockchain) = blockchain_proxy
-        {
-            validator_or_mempool = Some(ValidatorOrMempool::Mempool(MempoolTask::new(
-                &consensus,
-                Arc::clone(blockchain),
-                config.mempool,
-            )));
-        }
-
         // Start network.
         network.listen_on(config.network.listen_addresses).await;
         network.start_connecting().await;
@@ -675,43 +526,18 @@ impl ClientInner {
                 network,
                 consensus: consensus.proxy(),
                 blockchain: blockchain_proxy,
-                #[cfg(feature = "validator")]
-                validator: validator_state,
-                #[cfg(feature = "wallet")]
-                wallet_store,
                 zkp_component: zkp_component.proxy(),
             }),
             consensus: Some(consensus),
-            #[cfg(feature = "validator")]
-            validator_or_mempool,
             zkp_component: Some(zkp_component),
         })
     }
 }
 
 /// Entry point for the Nimiq client API.
-///
-/// This client object abstracts a complete Nimiq client. Many internal objects are exposed:
-///
-/// * `Consensus` - Contains most other objects, such as blockchain, mempool, etc.
-/// * `Blockchain` - The blockchain. Use this to query blocks or transactions
-/// * `Validator` - If the client runs a validator, this exposes access to the validator state,
-///   such as progress of current signature aggregations.
-/// * `Database` - This can be stored to store arbitrary byte strings along-side the consensus state
-///   (e.g. the chain info). Make sure you don't collide with database names - e.g. by prefixing
-///   them with something.
-/// * ...
-///
-/// # ToDo
-///
-/// * Shortcuts for common tasks, such at `get_block`.
-/// * Register listeners for certain events.
-///
 pub struct Client {
     inner: Arc<ClientInner>,
     consensus: Option<Consensus>,
-    #[cfg(feature = "validator")]
-    validator_or_mempool: Option<ValidatorOrMempool>,
     zkp_component: Option<ZKPComponent>,
 }
 
@@ -742,69 +568,6 @@ impl Client {
     /// Returns the blockchain head
     pub fn blockchain_head(&self) -> Block {
         self.inner.blockchain.read().head().clone()
-    }
-
-    #[cfg(feature = "wallet")]
-    pub fn wallet_store(&self) -> Arc<WalletStore> {
-        Arc::clone(&self.inner.wallet_store)
-    }
-
-    /// Returns the *Validator* or `None`.
-    #[cfg(feature = "validator")]
-    pub fn take_validator(&mut self) -> Option<Validator> {
-        if self
-            .validator_or_mempool
-            .as_ref()
-            .map(|v| matches!(v, ValidatorOrMempool::Validator(_)))?
-        {
-            match self.validator_or_mempool.take()? {
-                ValidatorOrMempool::Validator(validator) => Some(validator),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Returns the *MempoolTask* or `None`.
-    /// This is only available if the client is not a validator.
-    #[cfg(feature = "validator")]
-    pub fn take_mempool(&mut self) -> Option<MempoolTask> {
-        if self
-            .validator_or_mempool
-            .as_ref()
-            .map(|v| matches!(v, ValidatorOrMempool::Mempool(_)))?
-        {
-            match self.validator_or_mempool.take()? {
-                ValidatorOrMempool::Mempool(mempool) => Some(mempool),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Returns the *ValidatorOrMempool* or `None`.
-    #[cfg(feature = "validator")]
-    pub fn take_validator_or_mempool(&mut self) -> Option<ValidatorOrMempool> {
-        self.validator_or_mempool.take()
-    }
-
-    #[cfg(feature = "validator")]
-    /// Returns a reference to the *Validator state*.
-    pub fn validator_state(&self) -> Option<Arc<RwLock<ValidatorState>>> {
-        self.inner.validator.clone()
-    }
-
-    #[cfg(feature = "validator")]
-    pub fn mempool(&self) -> Option<Arc<Mempool>> {
-        match self.validator_or_mempool {
-            Some(ValidatorOrMempool::Mempool(ref mempool)) => Some(Arc::clone(&mempool.mempool)),
-            Some(ValidatorOrMempool::Validator(ref validator)) => {
-                Some(Arc::clone(&validator.mempool_task.mempool))
-            }
-            None => None,
-        }
     }
 
     /// Returns a reference to the *ZKP Component* or none.

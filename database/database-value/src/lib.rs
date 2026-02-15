@@ -1,3 +1,5 @@
+pub mod compressed;
+
 use std::{borrow::Cow, ffi::CStr, mem, slice};
 
 pub trait IntoDatabaseValue {

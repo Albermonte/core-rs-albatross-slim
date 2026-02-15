@@ -68,6 +68,11 @@ impl<S: HistoryInterface> HistoryInterface for HistoryStoreMerger<S> {
         self.main.remove_history(txn, epoch_number)
     }
 
+    fn remove_history_tree(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32) {
+        assert_ne!(epoch_number, 0, "Epoch 0 is pre-genesis");
+        self.main.remove_history_tree(txn, epoch_number);
+    }
+
     fn get_history_tree_root(
         &self,
         block_number: u32,

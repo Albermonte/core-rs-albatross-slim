@@ -37,14 +37,9 @@ nimiq = { workspace = true, features = [
     "full-consensus",
     "logging",
     "loki",
-    "metrics-server",
     "panic",
     "rpc-server",
     "signal-handling",
-    "validator",
-    "wallet",
-    "zkp-prover",
-    "parallel",
 ] }
 nimiq-primitives = { workspace = true, features = ["policy"] }
 nimiq-serde = { workspace = true }

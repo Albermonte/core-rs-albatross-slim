@@ -5,8 +5,7 @@ use std::{
     ops::{Deref, Range},
 };
 
-use nimiq_database_value::{AsDatabaseBytes, FromDatabaseBytes};
-use nimiq_database_value_derive::DbSerializable;
+use nimiq_database_value::{AsDatabaseBytes, FromDatabaseBytes, IntoDatabaseValue};
 use nimiq_hash::{Blake2bHash, Blake2bHasher, Hash, Hasher};
 use nimiq_hash_derive::SerializeContent;
 use nimiq_keys::Address;
@@ -92,7 +91,7 @@ impl FromDatabaseBytes for ExecutedTransactionHash {
 
 /// A single struct that stores information that represents any possible transaction (basic
 /// transaction or inherent) on the blockchain.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DbSerializable)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoricTransaction {
     /// The ID of the network where the transaction happened.
     pub network_id: NetworkId,
@@ -102,6 +101,31 @@ pub struct HistoricTransaction {
     pub block_time: u64,
     /// A struct containing the transaction data.
     pub data: HistoricTransactionData,
+}
+
+impl AsDatabaseBytes for HistoricTransaction {
+    fn as_key_bytes(&self) -> Cow<'_, [u8]> {
+        let raw = nimiq_serde::Serialize::serialize_to_vec(self);
+        Cow::Owned(nimiq_database_value::compressed::compress(&raw))
+    }
+}
+
+impl FromDatabaseBytes for HistoricTransaction {
+    fn from_key_bytes(bytes: &[u8]) -> Self {
+        let decompressed = nimiq_database_value::compressed::decompress(bytes);
+        nimiq_serde::Deserialize::deserialize_from_vec(&decompressed).unwrap()
+    }
+}
+
+impl IntoDatabaseValue for HistoricTransaction {
+    fn database_byte_size(&self) -> usize {
+        self.as_key_bytes().len()
+    }
+
+    fn copy_into_database(&self, bytes: &mut [u8]) {
+        let compressed = self.as_key_bytes();
+        bytes[..compressed.len()].copy_from_slice(&compressed);
+    }
 }
 
 /// Why a historic transaction cannot be represented as a basic transaction.

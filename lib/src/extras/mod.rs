@@ -4,8 +4,6 @@ pub mod deadlock;
 pub mod dht_fallback;
 #[cfg(feature = "logging")]
 pub mod logging;
-#[cfg(feature = "metrics-server")]
-pub mod metrics_server;
 #[cfg(feature = "panic")]
 pub mod panic;
 #[cfg(feature = "rpc-server")]

@@ -573,6 +573,10 @@ impl HistoryInterface for HistoryStoreIndex {
 
         Some(())
     }
+
+    fn remove_history_tree(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32) {
+        self.history_store.remove_history_tree(txn, epoch_number);
+    }
 }
 
 /// An iterator over the transaction hashes in the `AddressTable` table.

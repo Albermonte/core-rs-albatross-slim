@@ -16,5 +16,8 @@ is-it-maintained-issue-resolution = { repository = "nimiq/core-rs" }
 is-it-maintained-open-issues = { repository = "nimiq/core-rs" }
 maintenance = { status = "experimental" }
 
+[dependencies]
+zstd = { version = "0.13", default-features = false }
+
 [lints]
 workspace = true

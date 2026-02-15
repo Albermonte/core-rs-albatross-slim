@@ -69,9 +69,11 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     /// Creates a new HistoryStore.
+    /// Note: ValidityStore is disabled — this fork has no mempool and doesn't need
+    /// replay-attack prevention via the validity window.
     pub fn new(db: MdbxDatabase, network_id: NetworkId) -> Self {
         let store = HistoryStore {
-            validity_store: Some(ValidityStore::new(db.clone())),
+            validity_store: None,
             db,
             network_id,
             hist_tree_table: HistoryTreeTable,
@@ -535,6 +537,11 @@ impl HistoryInterface for HistoryStore {
         self.remove_epoch_from_history(txn, epoch_number);
 
         Some(())
+    }
+
+    /// Removes only the MMR tree data for a given epoch, keeping transaction data intact.
+    fn remove_history_tree(&self, txn: &mut MdbxWriteTransaction, epoch_number: u32) {
+        txn.remove(&self.hist_tree_table, &epoch_number);
     }
 
     /// Gets the history tree root for a given epoch.
