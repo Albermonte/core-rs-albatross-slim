@@ -44,7 +44,6 @@ use crate::{
 pub type Consensus = AbstractConsensus<Network>;
 pub type ConsensusProxy = AbstractConsensusProxy<Network>;
 
-
 /// Holds references to the relevant structs. This is then Arc'd in `Client` and a nice API is
 /// exposed.
 pub(crate) struct ClientInner {
@@ -55,7 +54,6 @@ pub(crate) struct ClientInner {
     consensus: ConsensusProxy,
 
     blockchain: BlockchainProxy,
-
 }
 
 /// This function is used to generate the services flags (provided, needed) based upon the configured sync mode
@@ -280,7 +278,10 @@ impl ClientInner {
             max_epochs_stored: config.consensus.max_epochs_stored,
             keep_history: config.consensus.sync_mode == SyncMode::History,
             index_history: config.consensus.index_history,
-            ..Default::default()
+            // This slim node runs no mempool and never serves history sync, so it skips the
+            // validity store and drops history trees of finalized epochs.
+            validity_store: false,
+            prune_history_tree: true,
         };
 
         let blockchain_proxy = match config.consensus.sync_mode {

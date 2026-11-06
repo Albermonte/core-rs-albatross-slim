@@ -48,6 +48,11 @@ pub struct HistoryStoreIndex {
 }
 
 impl HistoryStoreIndex {
+    /// See [`HistoryStore::disable_validity_store`].
+    pub fn disable_validity_store(&mut self) {
+        self.history_store.disable_validity_store();
+    }
+
     /// Creates a new HistoryStore.
     pub fn new(db: MdbxDatabase, network_id: NetworkId) -> Self {
         let index = HistoryStoreIndex {

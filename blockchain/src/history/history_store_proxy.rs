@@ -30,16 +30,31 @@ impl MergedHistoryStoreProxy {
         env: MdbxDatabase,
         pre_genesis_env: Option<MdbxDatabase>,
         with_index: bool,
+        with_validity_store: bool,
         network_id: NetworkId,
     ) -> Self {
         if with_index {
-            let main = HistoryStoreIndex::new(env, network_id);
-            let pre_genesis = pre_genesis_env.map(|env| HistoryStoreIndex::new(env, network_id));
+            let new_store = |env| {
+                let mut store = HistoryStoreIndex::new(env, network_id);
+                if !with_validity_store {
+                    store.disable_validity_store();
+                }
+                store
+            };
+            let main = new_store(env);
+            let pre_genesis = pre_genesis_env.map(new_store);
 
             HistoryStoreProxy::WithIndex(HistoryStoreMerger::new(pre_genesis, main))
         } else {
-            let main = HistoryStore::new(env, network_id);
-            let pre_genesis = pre_genesis_env.map(|env| HistoryStore::new(env, network_id));
+            let new_store = |env| {
+                let mut store = HistoryStore::new(env, network_id);
+                if !with_validity_store {
+                    store.disable_validity_store();
+                }
+                store
+            };
+            let main = new_store(env);
+            let pre_genesis = pre_genesis_env.map(new_store);
 
             HistoryStoreProxy::WithoutIndex(HistoryStoreMerger::new(pre_genesis, main))
         }

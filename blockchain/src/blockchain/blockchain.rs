@@ -72,6 +72,13 @@ pub struct BlockchainConfig {
     pub max_epochs_stored: u32,
     /// Enables/Disables indices in the history store.
     pub index_history: bool,
+    /// Tracks transactions of the validity window in the history store. Only needed for replay
+    /// protection when the node runs a mempool.
+    pub validity_store: bool,
+    /// When keeping history, deletes the history tree (MMR) of finalized epochs to save storage.
+    /// Transactions stay available, but the node can no longer serve history proofs or history
+    /// sync for those epochs.
+    pub prune_history_tree: bool,
 }
 
 impl Default for BlockchainConfig {
@@ -80,6 +87,8 @@ impl Default for BlockchainConfig {
             keep_history: true,
             max_epochs_stored: Policy::MIN_EPOCHS_STORED,
             index_history: true,
+            validity_store: true,
+            prune_history_tree: false,
         }
     }
 }
@@ -175,6 +184,7 @@ impl Blockchain {
             env.clone(),
             pre_genesis_env,
             config.index_history,
+            config.validity_store,
             network_id,
         ));
 

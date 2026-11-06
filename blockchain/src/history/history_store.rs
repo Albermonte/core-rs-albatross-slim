@@ -75,11 +75,9 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     /// Creates a new HistoryStore.
-    /// Note: ValidityStore is disabled — this fork has no mempool and doesn't need
-    /// replay-attack prevention via the validity window.
     pub fn new(db: MdbxDatabase, network_id: NetworkId) -> Self {
         let store = HistoryStore {
-            validity_store: None,
+            validity_store: Some(ValidityStore::new(db.clone())),
             db,
             network_id,
             hist_tree_table: HistoryTreeTable,
@@ -91,6 +89,12 @@ impl HistoryStore {
         store.create_tables();
 
         store
+    }
+
+    /// Stops tracking transactions in the validity window. Nodes without a mempool don't need
+    /// replay protection through the validity store, so they can skip storing it.
+    pub fn disable_validity_store(&mut self) {
+        self.validity_store = None;
     }
 
     /// Creates a new HistoryStore.

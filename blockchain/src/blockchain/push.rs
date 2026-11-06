@@ -369,7 +369,7 @@ impl Blockchain {
                     if !this.config.keep_history {
                         // Prune the History Store entirely (MMR + transactions).
                         this.history_store.remove_history(&mut txn, pruned_epoch);
-                    } else {
+                    } else if this.config.prune_history_tree {
                         // When keeping history, still prune MMR tree data for old
                         // epochs to save storage. Transaction data is retained for
                         // RPC queries; only proof nodes are discarded.
