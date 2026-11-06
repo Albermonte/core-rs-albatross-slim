@@ -278,9 +278,9 @@ impl ClientInner {
             max_epochs_stored: config.consensus.max_epochs_stored,
             keep_history: config.consensus.sync_mode == SyncMode::History,
             index_history: config.consensus.index_history,
-            // This slim node runs no mempool and never serves history sync, so it skips the
-            // validity store and drops history trees of finalized epochs.
-            validity_store: false,
+            // This slim node never serves history sync, so it drops history trees of finalized
+            // epochs. The validity store stays on: block validation needs it to reject replays.
+            validity_store: true,
             prune_history_tree: true,
         };
 
