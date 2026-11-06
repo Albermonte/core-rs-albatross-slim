@@ -1,32 +1,35 @@
-use std::path::Path;
+use std::ops::Add;
 
 use nimiq_block::{
     Block, BlockError, DoubleProposalProof, DoubleVoteProof, EquivocationProofError, ForkProof,
 };
-use nimiq_blockchain::Blockchain;
 use nimiq_blockchain_interface::{
-    AbstractBlockchain, PushError,
+    AbstractBlockchain, BlockchainEvent, PushError,
     PushError::{InvalidBlock, InvalidEquivocationProof},
     PushResult,
 };
 use nimiq_bls::AggregateSignature;
-use nimiq_hash::{Blake2bHash, Blake2sHash, HashOutput};
+use nimiq_hash::{Blake2bHash, Blake2sHash, Hash, HashOutput};
 use nimiq_keys::KeyPair;
 use nimiq_primitives::{
-    key_nibbles::KeyNibbles, networks::NetworkId, policy::Policy, TendermintIdentifier,
-    TendermintProposal, TendermintStep,
+    networks::NetworkId,
+    policy::{upgrades, Policy},
+    TendermintIdentifier, TendermintProposal, TendermintStep,
 };
 use nimiq_test_log::test;
 use nimiq_test_utils::{
     block_production::TemporaryBlockProducer,
-    blockchain::validator_address,
+    blockchain::{
+        fill_micro_blocks_with_txns, next_protocol_upgrade_block, produce_macro_blocks_with_txns,
+        validator_address,
+    },
+    blockchain_events_broadcast::{assert_events_eq_unordered, try_collect_events},
     test_custom_block::{next_macro_block, next_micro_block, next_skip_block, BlockConfig},
     test_rng,
-    zkp_test_data::{get_base_seed, simulate_merger_wrapper, ZKP_TEST_KEYS_PATH},
+    versions::{assert_all_versions, bp},
 };
 use nimiq_utils::key_rng::SecureGenerate;
 use nimiq_vrf::VrfSeed;
-use nimiq_zkp::ZKP_VERIFYING_DATA;
 
 pub fn expect_push_micro_block(config: BlockConfig, expected_res: Result<PushResult, PushError>) {
     if config.test_micro {
@@ -246,6 +249,77 @@ fn simply_push_election_block(config: &BlockConfig, expected_res: &Result<PushRe
 }
 
 #[test]
+fn it_emits_protocol_upgrade_event_for_election_push() {
+    let temp_producer = TemporaryBlockProducer::new();
+    let init_version = temp_producer.blockchain.read().protocol_version();
+    produce_macro_blocks_with_txns(
+        &temp_producer.producer,
+        &temp_producer.blockchain,
+        (Policy::batches_per_epoch() - 1) as usize,
+        1,
+        0,
+    );
+    fill_micro_blocks_with_txns(&temp_producer.producer, &temp_producer.blockchain, 1, 0);
+
+    let mut receiver = temp_producer.blockchain.read().notifier.subscribe();
+    let (upgrade_block, upgrade_version) =
+        next_protocol_upgrade_block(&temp_producer.producer, &temp_producer.blockchain);
+    let upgrade_hash = upgrade_block.hash();
+
+    assert_eq!(temp_producer.push(upgrade_block), Ok(PushResult::Extended));
+    assert_events_eq_unordered(
+        try_collect_events(&mut receiver).unwrap(),
+        vec![
+            BlockchainEvent::Extended(upgrade_hash.clone()),
+            BlockchainEvent::EpochFinalized(upgrade_hash.clone()),
+            BlockchainEvent::ProtocolUpgrade(upgrade_hash, upgrade_version),
+        ],
+    );
+    let blockchain = temp_producer.blockchain.read();
+    assert_eq!(init_version.add(1), upgrade_version);
+    assert_eq!(blockchain.protocol_version(), upgrade_version);
+}
+
+#[test]
+fn it_does_not_emit_protocol_upgrade_event_without_version_change() {
+    let temp_producer = TemporaryBlockProducer::new();
+    let init_version = temp_producer.blockchain.read().protocol_version();
+    produce_macro_blocks_with_txns(
+        &temp_producer.producer,
+        &temp_producer.blockchain,
+        (Policy::batches_per_epoch() - 1) as usize,
+        1,
+        0,
+    );
+    fill_micro_blocks_with_txns(&temp_producer.producer, &temp_producer.blockchain, 1, 0);
+
+    let mut receiver = temp_producer.blockchain.read().notifier.subscribe();
+    let election_block = {
+        let blockchain = temp_producer.blockchain.read();
+        next_macro_block(
+            &temp_producer.producer.signing_key,
+            &temp_producer.producer.voting_key,
+            &blockchain,
+            &BlockConfig::default(),
+        )
+    };
+    let election_hash = election_block.hash();
+
+    assert_eq!(temp_producer.push(election_block), Ok(PushResult::Extended));
+    assert_events_eq_unordered(
+        try_collect_events(&mut receiver).unwrap(),
+        vec![
+            BlockchainEvent::Extended(election_hash.clone()),
+            BlockchainEvent::EpochFinalized(election_hash),
+        ],
+    );
+    assert_eq!(
+        init_version,
+        temp_producer.blockchain.read().protocol_version()
+    );
+}
+
+#[test]
 fn it_works_with_valid_blocks() {
     let config = BlockConfig::default();
 
@@ -395,7 +469,7 @@ fn it_validates_state_root() {
         ..Default::default()
     };
 
-    // This does not fail since now the state root is properly calculated from strach
+    // This does not fail since now the state root is properly calculated from scratch
     push_micro_after_micro(&config, &Ok(PushResult::Extended));
 
     push_rebranch(&config, &Err(PushError::InvalidFork));
@@ -585,60 +659,136 @@ fn it_validates_double_vote_proofs() {
     )
 }
 
-#[test]
-fn can_push_zkps() {
-    let temp_producer1 = TemporaryBlockProducer::new();
-    let temp_producer2 = TemporaryBlockProducer::new();
+/// Seeds a chain at `version`, produces a micro block whose `diff_root` does not match its real
+/// state diff, and returns the push result.
+fn push_micro_block_with_wrong_diff_root(version: u16) -> Result<PushResult, PushError> {
+    let temp_producer = TemporaryBlockProducer::new_with_protocol_version(version);
+    let block = {
+        let blockchain = temp_producer.blockchain.read();
+        next_micro_block(
+            &temp_producer.producer.signing_key,
+            &blockchain,
+            &BlockConfig {
+                diff_root: Some("invalid diff root".hash()),
+                ..Default::default()
+            },
+        )
+    };
+    temp_producer.push(Block::Micro(block))
+}
 
-    // Produce a full epoch of blocks.
+/// Seeds a chain at `version`, produces a skip block whose `diff_root` does not match its real
+/// state diff, and returns the push result.
+fn push_skip_block_with_wrong_diff_root(version: u16) -> Result<PushResult, PushError> {
+    let temp_producer = TemporaryBlockProducer::new_with_protocol_version(version);
+    let block = {
+        let blockchain = temp_producer.blockchain.read();
+        next_skip_block(
+            &temp_producer.producer.voting_key,
+            &blockchain,
+            &BlockConfig {
+                diff_root: Some("invalid diff root".hash()),
+                ..Default::default()
+            },
+        )
+    };
+    temp_producer.push(Block::Micro(block))
+}
+
+/// Seeds a chain at `version`, advances to the (checkpoint) macro block and produces it with a
+/// `diff_root` that does not match its real state diff, and returns the push result.
+fn push_macro_block_with_wrong_diff_root(version: u16) -> Result<PushResult, PushError> {
+    let temp_producer = TemporaryBlockProducer::new_with_protocol_version(version);
+    for _ in 0..Policy::blocks_per_batch() - 1 {
+        let block = temp_producer.next_block(vec![], false);
+        temp_producer.push(block).unwrap();
+    }
+    let block = {
+        let blockchain = temp_producer.blockchain.read();
+        next_macro_block(
+            &temp_producer.producer.signing_key,
+            &temp_producer.producer.voting_key,
+            &blockchain,
+            &BlockConfig {
+                diff_root: Some("invalid diff root".hash()),
+                ..Default::default()
+            },
+        )
+    };
+    temp_producer.push(block)
+}
+
+/// Seeds a chain at `version`, advances to the election block and produces it with a `diff_root`
+/// that does not match its real state diff, and returns the push result.
+fn push_election_block_with_wrong_diff_root(version: u16) -> Result<PushResult, PushError> {
+    let temp_producer = TemporaryBlockProducer::new_with_protocol_version(version);
     for _ in 0..Policy::blocks_per_epoch() - 1 {
-        temp_producer1.next_block(vec![], false);
+        let block = temp_producer.next_block(vec![], false);
+        temp_producer.push(block).unwrap();
     }
-    let election_block = temp_producer1.next_block(vec![], false);
-    let block_number = election_block.block_number();
+    let block = {
+        let blockchain = temp_producer.blockchain.read();
+        next_macro_block(
+            &temp_producer.producer.signing_key,
+            &temp_producer.producer.voting_key,
+            &blockchain,
+            &BlockConfig {
+                diff_root: Some("invalid diff root".hash()),
+                ..Default::default()
+            },
+        )
+    };
+    temp_producer.push(block)
+}
 
-    // Try pushing an invalid ZKP.
-    let invalid_zkp_proof = Default::default();
-    let blockchain2 = temp_producer2.blockchain.upgradable_read();
-    let result = Blockchain::push_zkp(
-        blockchain2,
-        election_block.clone(),
-        invalid_zkp_proof,
-        false,
+/// On push, a micro block carrying a wrong `diff_root` is accepted before
+/// `DIFF_ROOT_COMMITMENT` and rejected from it onward.
+#[test]
+fn it_verifies_the_micro_block_diff_root_from_the_commitment_version() {
+    assert_all_versions(
+        |v| push_micro_block_with_wrong_diff_root(v) == Ok(PushResult::Extended),
+        vec![bp(upgrades::v2::DIFF_ROOT_COMMITMENT, |v| {
+            push_micro_block_with_wrong_diff_root(v)
+                == Err(InvalidBlock(BlockError::DiffRootMismatch))
+        })],
     );
+}
 
-    assert_eq!(result, Err(PushError::InvalidZKP));
-    {
-        let blockchain2_rg = temp_producer2.blockchain.read();
-        assert_eq!(
-            blockchain2_rg.block_number(),
-            Policy::genesis_block_number()
-        );
-
-        assert!(blockchain2_rg.can_enforce_validity_window());
-        assert_eq!(blockchain2_rg.get_missing_accounts_range(None), None);
-    }
-
-    // Create and push a valid ZKP.
-    let zkp_proof = simulate_merger_wrapper(
-        Path::new(ZKP_TEST_KEYS_PATH),
-        &temp_producer1.blockchain,
-        &ZKP_VERIFYING_DATA,
-        &mut get_base_seed(),
+/// On push, a skip block carrying a wrong `diff_root` is accepted before
+/// `DIFF_ROOT_COMMITMENT` and rejected from it onward.
+#[test]
+fn it_verifies_the_skip_block_diff_root_from_the_commitment_version() {
+    assert_all_versions(
+        |v| push_skip_block_with_wrong_diff_root(v) == Ok(PushResult::Extended),
+        vec![bp(upgrades::v2::DIFF_ROOT_COMMITMENT, |v| {
+            push_skip_block_with_wrong_diff_root(v)
+                == Err(InvalidBlock(BlockError::DiffRootMismatch))
+        })],
     );
+}
 
-    let blockchain2 = temp_producer2.blockchain.upgradable_read();
-    let result = Blockchain::push_zkp(blockchain2, election_block, zkp_proof.proof.unwrap(), false);
+/// On push, a macro block carrying a wrong `diff_root` is accepted before
+/// `DIFF_ROOT_COMMITMENT` and rejected from it onward.
+#[test]
+fn it_verifies_the_macro_block_diff_root_from_the_commitment_version() {
+    assert_all_versions(
+        |v| push_macro_block_with_wrong_diff_root(v) == Ok(PushResult::Extended),
+        vec![bp(upgrades::v2::DIFF_ROOT_COMMITMENT, |v| {
+            push_macro_block_with_wrong_diff_root(v)
+                == Err(InvalidBlock(BlockError::DiffRootMismatch))
+        })],
+    );
+}
 
-    assert_eq!(result, Ok(PushResult::Extended));
-    {
-        let blockchain2_rg = temp_producer2.blockchain.read();
-        assert_eq!(blockchain2_rg.block_number(), block_number);
-
-        assert!(!blockchain2_rg.can_enforce_validity_window());
-        assert_eq!(
-            blockchain2_rg.get_missing_accounts_range(None),
-            Some(KeyNibbles::ROOT..)
-        );
-    }
+/// On push, an election block carrying a wrong `diff_root` is accepted before
+/// `DIFF_ROOT_COMMITMENT` and rejected from it onward.
+#[test]
+fn it_verifies_the_election_block_diff_root_from_the_commitment_version() {
+    assert_all_versions(
+        |v| push_election_block_with_wrong_diff_root(v) == Ok(PushResult::Extended),
+        vec![bp(upgrades::v2::DIFF_ROOT_COMMITMENT, |v| {
+            push_election_block_with_wrong_diff_root(v)
+                == Err(InvalidBlock(BlockError::DiffRootMismatch))
+        })],
+    );
 }

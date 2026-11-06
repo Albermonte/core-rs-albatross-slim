@@ -38,7 +38,7 @@ mod handlers;
 
 /// Message containing the header and justification of either a macro or micro block.
 /// Used when broadcasting block headers over the network.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SerializedMaxSize)]
 pub enum BlockHeaderMessage {
     Macro {
         header: MacroHeader,
@@ -133,7 +133,7 @@ impl From<BlockHeaderMessage> for Block {
 }
 
 /// Message containing the body of a block, paired with the hash of its header message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SerializedMaxSize)]
 pub struct BlockBodyMessage {
     /// Hash of the corresponding [`BlockHeaderMessage`].
     ///
@@ -156,6 +156,8 @@ impl Topic for BlockHeaderTopic {
     const NAME: &'static str = "block-header";
     const VALIDATE: bool = true;
     const MAX_MESSAGES: u32 = 20;
+    // Valid block headers are bounded below the gossipsub message size limit.
+    const MAX_MESSAGE_SIZE: usize = BlockHeaderMessage::MAX_SIZE;
 }
 
 /// GossipSub topic for broadcasting block body messages.
@@ -169,6 +171,8 @@ impl Topic for BlockBodyTopic {
     const NAME: &'static str = "block-body";
     const VALIDATE: bool = true;
     const MAX_MESSAGES: u32 = BlockHeaderTopic::MAX_MESSAGES;
+    // Valid block bodies are bounded far below the gossipsub message size limit.
+    const MAX_MESSAGE_SIZE: usize = BlockBodyMessage::MAX_SIZE;
 }
 
 /*
@@ -275,6 +279,8 @@ pub enum BatchSetError {
     TargetHashNotFound,
     #[error("the hash of a micro block was given")]
     MicroBlockGiven,
+    #[error("couldn't produce history size proof")]
+    CouldntProduceHistorySizeProof,
     #[error("unknown error")]
     #[serde(other)]
     Other,
@@ -604,8 +610,12 @@ pub struct ResponseTrieProof {
 pub enum ResponseTrieProofError {
     #[error("incomplete trie")]
     IncompleteTrie,
+    #[error("empty keys")]
+    EmptyKeys,
     #[error("too many keys")]
     TooManyKeys,
+    #[error("duplicate keys")]
+    DuplicateKeys,
     #[error("unknown error")]
     #[serde(other)]
     Other,
@@ -699,4 +709,47 @@ impl Topic for AddressSubscriptionTopic {
     const NAME: &'static str = "address-subscription";
     const VALIDATE: bool = false;
     const MAX_MESSAGES: u32 = 10_000;
+}
+
+#[cfg(test)]
+mod tests {
+    use nimiq_block::{MacroBody, MacroHeader, TendermintProof};
+    use nimiq_hash::Blake2bHash;
+    use nimiq_network_interface::network::{Topic, MIN_SUPPORTED_MSG_SIZE};
+    use nimiq_primitives::policy::Policy;
+    use nimiq_serde::SerializedMaxSize;
+    use nimiq_test_log::test;
+
+    use super::{BlockBodyTopic, BlockHeaderTopic};
+
+    #[test]
+    fn block_body_topic_max_message_size() {
+        // A message carrying a valid body must fit: the header message hash,
+        // the `BlockBody` variant and the body itself.
+        const {
+            assert!(
+                BlockBodyTopic::MAX_MESSAGE_SIZE
+                    >= Blake2bHash::SIZE + 1 + Policy::MAX_SIZE_MICRO_BODY
+            )
+        };
+        const {
+            assert!(BlockBodyTopic::MAX_MESSAGE_SIZE >= Blake2bHash::SIZE + 1 + MacroBody::MAX_SIZE)
+        };
+        // The limit must be tighter than the one gossipsub enforces.
+        const { assert!(BlockBodyTopic::MAX_MESSAGE_SIZE < MIN_SUPPORTED_MSG_SIZE) };
+    }
+
+    #[test]
+    fn block_header_topic_max_message_size() {
+        // A message carrying a valid macro header must fit: the `BlockHeaderMessage`
+        // variant, the header and its justification.
+        const {
+            assert!(
+                BlockHeaderTopic::MAX_MESSAGE_SIZE
+                    >= 1 + MacroHeader::MAX_SIZE + TendermintProof::MAX_SIZE
+            )
+        };
+        // The limit must be tighter than the one gossipsub enforces.
+        const { assert!(BlockHeaderTopic::MAX_MESSAGE_SIZE < MIN_SUPPORTED_MSG_SIZE) };
+    }
 }

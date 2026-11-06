@@ -28,14 +28,15 @@ use nimiq_mempool::mempool::Mempool;
 use nimiq_primitives::{coin::Coin, networks::NetworkId, policy::Policy};
 use nimiq_transaction::Transaction;
 use nimiq_transaction_builder::TransactionBuilder;
-use nimiq_utils::spawn;
+use nimiq_utils::{spawn, spawn_blocking};
 use rand::{
     distr::{weighted::WeightedIndex, Distribution},
-    Rng,
+    RngExt,
 };
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
+#[command(name = "nimiq-spammer", version = nimiq_utils::CARGO_VERSION)]
 pub struct SpammerCommandLine {
     /// Use a custom configuration file.
     ///
@@ -150,7 +151,6 @@ async fn main_inner() -> Result<(), Error> {
         passive: false,
         sync_mode: None,
         network: None,
-        prove: false,
     };
 
     // Parse config file - this will obey the `--config` command line option.
@@ -243,6 +243,7 @@ async fn main_inner() -> Result<(), Error> {
         use nimiq::extras::metrics_server::start_metrics_server;
         start_metrics_server(
             metrics_config.addr,
+            metrics_config.credentials,
             client.blockchain(),
             client.mempool(),
             client.consensus_proxy(),
@@ -260,9 +261,6 @@ async fn main_inner() -> Result<(), Error> {
     } else {
         panic!("Could not start spammer");
     };
-
-    let zkp_component = client.take_zkp_component().unwrap();
-    spawn(zkp_component);
 
     let rolling_window = Policy::blocks_per_batch() as usize;
 
@@ -295,8 +293,6 @@ async fn main_inner() -> Result<(), Error> {
         while let Some(event) = bc_events.next().await {
             let hash = match event {
                 BlockchainEvent::Extended(hash) => Some(hash),
-                BlockchainEvent::EpochFinalized(hash) => Some(hash),
-                BlockchainEvent::Finalized(hash) => Some(hash),
                 _ => None,
             };
             if let Some(hash) = hash {
@@ -400,7 +396,7 @@ async fn spam(
         let blockchain = consensus.blockchain.read();
         (blockchain.block_number(), blockchain.network_id())
     };
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking(move || {
         let choices = [
             SpamType::BaseBasicTransaction,
             SpamType::BurstBasicTransaction,
@@ -456,8 +452,7 @@ async fn spam(
         }
         log::info!("\tSent {} transactions to the network.\n", txn_count);
     })
-    .await
-    .expect("spawn_blocking() panicked");
+    .await;
 }
 
 fn generate_basic_transactions(

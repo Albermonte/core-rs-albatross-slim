@@ -11,7 +11,9 @@ use nimiq_keys::{
     Address, Ed25519PublicKey as SchnorrPublicKey, KeyPair as SchnorrKeyPair,
     PrivateKey as SchnorrPrivateKey, SecureGenerate,
 };
-use nimiq_mempool::{config::MempoolConfig, mempool::Mempool, mempool_transactions::TxPriority};
+use nimiq_mempool::{
+    config::MempoolConfig, mempool::Mempool, mempool_transactions::TxPriority, verify::VerifyErr,
+};
 use nimiq_network_mock::{MockHub, MockId, MockNetwork, MockPeerId};
 use nimiq_primitives::{coin::Coin, networks::NetworkId, policy::Policy};
 use nimiq_serde::{Deserialize, Serialize};
@@ -2040,6 +2042,50 @@ async fn assert_rebase_invalidates_mempool_tx(tx1: Transaction, tx2: Transaction
 }
 
 #[test(tokio::test)]
+// Transactions handed out for block building are taken out of the mempool. If that block is never
+// produced they have to go back in, otherwise a failed block production silently drops a whole
+// body worth of perfectly good transactions.
+async fn returns_transactions_of_a_block_that_was_never_produced() {
+    let key_pair = ed25519_key_pair(ACCOUNT_SECRET_KEY);
+    let tx = TransactionBuilder::new_basic(
+        &key_pair,
+        Address::default(),
+        100.try_into().unwrap(),
+        Coin::ZERO,
+        1 + Policy::genesis_block_number(),
+        NetworkId::UnitAlbatross,
+    )
+    .unwrap();
+
+    let temp_producer = TemporaryBlockProducer::new();
+    let mempool = Mempool::new(
+        Arc::clone(&temp_producer.blockchain),
+        MempoolConfig::default(),
+    );
+    let mut hub = MockHub::new();
+    let mock_id = MockId::new(hub.new_address().into());
+    let mock_network = Arc::new(hub.new_network());
+
+    send_txn_to_mempool(&mempool, mock_network, mock_id, vec![tx.clone()]).await;
+    assert_eq!(mempool.get_transactions(), vec![tx.clone()]);
+
+    // Picking transactions for a block takes them out of the mempool.
+    let (selected, _) = mempool.get_transactions_for_block(10_000);
+    assert_eq!(selected, vec![tx.clone()]);
+    assert!(mempool.get_transactions().is_empty());
+
+    // The block was never produced, so they belong back in.
+    mempool.return_transactions_locked(&temp_producer.blockchain.read(), selected);
+    assert_eq!(mempool.get_transactions(), vec![tx.clone()]);
+
+    // A transaction that did make it into a block is not put back, though.
+    let (selected, _) = mempool.get_transactions_for_block(10_000);
+    temp_producer.next_block_with_txs(vec![], false, selected.clone());
+    mempool.return_transactions_locked(&temp_producer.blockchain.read(), selected);
+    assert!(mempool.get_transactions().is_empty());
+}
+
+#[test(tokio::test)]
 // Check that txs are removed from the mempool if they become invalid due to a rebranch.
 // If the timestamp of the chain gets lower due to a rebranch, this can invalidate redeem txs for
 // HTLCs and Vesting contracts, which already released a balance on the former chain.
@@ -2202,5 +2248,102 @@ async fn it_can_reject_invalid_vesting_contract_transaction() {
         mempool.num_transactions(),
         0,
         "Number of txns in the mempools is not what is expected"
+    );
+}
+
+#[test(tokio::test)]
+async fn tx_per_sender_limit_is_enforced() {
+    let tx_per_sender_limit = 3_usize;
+    let num_recipients = tx_per_sender_limit + 1;
+
+    let mut rng = test_rng(true);
+    let mut genesis_builder = GenesisBuilder::default();
+    genesis_builder.with_network(NetworkId::UnitAlbatross);
+
+    // One sender with enough balance for all transactions
+    let sender_accounts =
+        generate_accounts(vec![1_000_000; 1], &mut genesis_builder, true, &mut rng);
+    // One distinct recipient per transaction
+    let recipient_accounts = generate_accounts(
+        vec![0; num_recipients],
+        &mut genesis_builder,
+        false,
+        &mut rng,
+    );
+
+    let mut mempool_transactions = vec![];
+    for i in 0..num_recipients {
+        mempool_transactions.push(TestTransaction {
+            fee: (i + 1) as u64,
+            value: 1,
+            sender: sender_accounts[0].clone(),
+            recipient: recipient_accounts[i].clone(),
+        });
+    }
+    let (txns, _) = generate_transactions(mempool_transactions, true);
+
+    let mut rng2 = test_rng(true);
+    genesis_builder.with_genesis_validator(
+        Address::from(&SchnorrKeyPair::generate(&mut rng2)),
+        SchnorrPublicKey::from([0u8; 32]),
+        BlsKeyPair::generate(&mut rng2).public_key,
+        Address::default(),
+        None,
+        None,
+        false,
+    );
+
+    let time = Arc::new(OffsetTime::new());
+    let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
+    let genesis_info = genesis_builder.generate(env.clone()).unwrap();
+
+    let genesis_block = match genesis_info.block {
+        Block::Macro(mut block) => {
+            block.header.block_number = Policy::genesis_block_number();
+            Block::Macro(block)
+        }
+        Block::Micro(_) => panic!(),
+    };
+
+    let blockchain = Arc::new(RwLock::new(
+        Blockchain::with_genesis(
+            env.clone(),
+            BlockchainConfig::default(),
+            time,
+            NetworkId::UnitAlbatross,
+            genesis_block,
+            genesis_info.accounts,
+        )
+        .unwrap(),
+    ));
+
+    let mempool = Mempool::new(
+        Arc::clone(&blockchain),
+        MempoolConfig {
+            tx_per_sender_limit,
+            ..Default::default()
+        },
+    );
+
+    // The first `tx_per_sender_limit` transactions must be accepted.
+    for tx in txns.iter().take(tx_per_sender_limit) {
+        assert_eq!(
+            mempool.add_transaction(tx.clone(), None),
+            Ok(()),
+            "Expected transaction to be accepted"
+        );
+    }
+    assert_eq!(mempool.num_transactions(), tx_per_sender_limit);
+
+    // The next transaction from the same sender must be rejected.
+    assert_eq!(
+        mempool.add_transaction(txns[tx_per_sender_limit].clone(), None),
+        Err(VerifyErr::SenderLimitReached),
+        "Expected transaction to be rejected due to per-sender limit"
+    );
+    assert_eq!(
+        mempool.num_transactions(),
+        tx_per_sender_limit,
+        "Mempool size should be unchanged after rejected transaction"
     );
 }

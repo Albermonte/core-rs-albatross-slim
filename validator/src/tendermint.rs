@@ -50,7 +50,8 @@ use crate::{
 // There are two distinct signatures for any given proposal.
 // The first one is a Schnorr signature from the proposer of any given round over the header hash.
 //     This hash does NOT include the pk_tree_root and this signature is not the one being aggregated.
-// The other one is a BLS signature over the zkp_hash, which is defined as Blake2S(Blake2b(header_hash).append(pk_tree_root))
+// The other one is a BLS signature over the block's Blake2s hash (`hash_blake2s`), which is defined as
+// Blake2S(Blake2b(header_hash).append(pk_tree_root)).
 //     This one is being aggregated, and contains the pk_tree_root, so the body is necessary for the verification of the signature.
 
 struct NetworkWrapper<TValidatorNetwork: ValidatorNetwork> {
@@ -231,54 +232,57 @@ where
         // Check if we want to upgrade the version.
         // This assumes we only ever upgrade to the latest version
         // and don't queue multiple upgrades.
-        let version = if blockchain.state().current_version() + 1 == Policy::max_supported_version()
+        // The version can only ever increase at election blocks (see `Block::verify_immediate_successor`),
+        // so we must not bump it on checkpoint macro blocks, which would be rejected by the network
+        let version = if Policy::is_election_block_at(self.block_height)
+            && blockchain.state().current_version() + 1 == Policy::max_supported_version()
         {
-            let staking_contract = blockchain
-                .get_staking_contract_if_complete(None)
-                .expect("Staking Contract must be complete to create a macro proposal");
+            let new_version = blockchain.state().current_version() + 1;
+            // The complete accounts state is needed to determine the upgrade support, as the
+            // support check below reads the individual validator entries of the staking
+            // contract. Abort instead of panicking, mirroring the stale-blockchain abort above
+            if !blockchain.accounts_complete() {
+                warn!("Cannot create macro proposal, accounts state is incomplete");
+                return Err(ProtocolError::Abort);
+            }
+            let Some(staking_contract) = blockchain.get_staking_contract_if_complete(None) else {
+                // Unreachable: the accounts state was just checked to be complete
+                return Err(ProtocolError::Abort);
+            };
             let data_store = blockchain.get_staking_contract_store();
             let txn = blockchain.read_transaction();
             let data_store_read = &data_store.read(&txn);
+            let validators = blockchain
+                .current_validators()
+                .expect("There need to be validators present");
 
-            // Calculate support for upgrade.
-            let support_check =
-                |data| Policy::supports_upgrade(data, blockchain.state().current_version() + 1);
-            let supporting_stake =
-                staking_contract.get_supporting_stake(data_store_read, support_check);
-            let total_active_stake = staking_contract.get_active_stake();
-            let supporting_slots = staking_contract.get_supporting_slots(
-                data_store_read,
-                blockchain
-                    .current_validators()
-                    .expect("There need to be validators present"),
-                support_check,
-            );
-
-            // We propose an upgraded block version only if:
-            // - `Policy::UPGRADE_MIN_SUPPORT` of the stake supports the upgrade.
-            // - `Policy::UPGRADE_MIN_SUPPORT` slots support the upgrade.
-            if supporting_slots * 100 >= Policy::SLOTS * Policy::UPGRADE_MIN_SUPPORT as u16
-                && u64::from(supporting_stake) * 100
-                    >= u64::from(total_active_stake) * Policy::UPGRADE_MIN_SUPPORT
-            {
-                info!(
-                    supporting_slots,
-                    %supporting_stake, %total_active_stake, "Triggering version upgrade"
-                );
-                Some(blockchain.state().current_version() + 1)
+            // We propose an upgraded block version only if the upgrade has enough support.
+            // The same predicate is enforced on the validation side (see
+            // `Blockchain::verify_block_state_pre_commit`), keeping both sides symmetric.
+            if staking_contract.supports_version_upgrade(data_store_read, validators, new_version) {
+                info!(new_version, "Triggering version upgrade");
+                Some(new_version)
             } else {
-                info!(
-                    supporting_slots,
-                    %supporting_stake, %total_active_stake, "Version upgrade does not have enough support"
-                );
+                info!(new_version, "Version upgrade does not have enough support");
                 None
             }
         } else {
             None
         };
 
-        // Create the proposal.
-        let time = blockchain.time.now();
+        // Create the proposal. This is proposer policy, not a consensus rule: validation accepts
+        // any timestamp from the predecessor up to `now + TIMESTAMP_MAX_DRIFT`. We target the macro
+        // block's scheduled slot (previous macro plus one batch of separation times), mirroring the
+        // micro block anchor in `expected_next_timestamp`, so an on-time batch keeps the block
+        // separation time without over-counting a late one. `now` is the fallback for a stalled
+        // chain, capped at the drift allowance so verifiers do not reject the proposal.
+        let now = blockchain.time.now();
+        let scheduled = blockchain.macro_head().header.timestamp.saturating_add(
+            Policy::BLOCK_SEPARATION_TIME.saturating_mul(Policy::blocks_per_batch() as u64),
+        );
+        let time = scheduled
+            .max(now)
+            .min(now.saturating_add(Policy::TIMESTAMP_MAX_DRIFT));
         let block = self
             .block_producer
             .next_macro_block_proposal(&blockchain, time, round, vec![], version)

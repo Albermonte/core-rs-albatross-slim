@@ -142,7 +142,7 @@ impl Blockchain {
         let mut inherents: Vec<Inherent> = if let Some(body) = macro_block.body.as_ref() {
             body.transactions.iter().map(Inherent::from).collect()
         } else {
-            self.create_reward_transactions(&macro_block.header, &self.get_staking_contract())
+            self.create_reward_transactions(&macro_block.header, &self.get_staking_contract(), None)
                 .iter()
                 .map(Inherent::from)
                 .collect()
@@ -160,6 +160,7 @@ impl Blockchain {
         &self,
         macro_header: &MacroHeader,
         staking_contract: &StakingContract,
+        txn_option: Option<&MdbxReadTransaction>,
     ) -> Vec<RewardTransaction> {
         let prev_macro_info = &self.state.macro_info;
 
@@ -221,10 +222,17 @@ impl Blockchain {
         // accept the inherent.
         let mut burned_reward = Coin::ZERO;
 
-        // Load the staking contract before iterating over the validator slots
-        let staking_contract = self.get_staking_contract();
+        // Read validators/recipient accounts from the SAME txn the caller used, so uncommitted
+        // changes earlier in this batch during a rebranch are reflected.
         let data_store = self.get_staking_contract_store();
-        let txn = self.read_transaction();
+        let owned_read_txn;
+        let txn = match txn_option {
+            Some(txn) => txn,
+            None => {
+                owned_read_txn = self.read_transaction();
+                &owned_read_txn
+            }
+        };
 
         // Compute inherents
         for validator_slot in validator_slots.iter() {
@@ -262,7 +270,7 @@ impl Blockchain {
 
             // Get the validator from the staking contract
             let validator = staking_contract
-                .get_validator(&data_store.read(&txn), &validator_slot.address)
+                .get_validator(&data_store.read(txn), &validator_slot.address)
                 .expect("Couldn't find validator in the accounts trie when paying rewards!");
 
             // Create inherent for the reward.
@@ -275,7 +283,7 @@ impl Blockchain {
             // Test whether account will accept inherent. If it can't then the reward will be
             // burned.
             // TODO Improve this check: it assumes that only BasicAccounts can receive transactions.
-            let account = self.state.accounts.get_complete(&tx.recipient, Some(&txn));
+            let account = self.state.accounts.get_complete(&tx.recipient, Some(txn));
             if account.account_type() == AccountType::Basic {
                 num_eligible_slots_for_accepted_tx.push(num_eligible_slots);
                 transactions.push(tx);
@@ -297,14 +305,18 @@ impl Blockchain {
         // validators that will receive rewards).
         assert_eq!(transactions.len(), num_eligible_slots_for_accepted_tx.len());
 
-        // Get RNG from last block's seed and build lookup table based on number of eligible slots.
-        let mut rng = macro_header.seed.rng(VrfUseCase::RewardDistribution);
-        let lookup = DiscreteDistribution::new(&num_eligible_slots_for_accepted_tx);
-
         // Randomly give remainder to one accepting slot. We don't bother to distribute it over all
         // accepting slots because the remainder is always at most SLOTS - 1 Lunas.
-        let index = lookup.sample(&mut rng);
-        transactions[index].value += remainder;
+        // If there are no eligible slots (e.g. all rewards burned due to non-BasicAccount reward
+        // addresses or all slots penalized), burn the remainder too.
+        if !transactions.is_empty() && num_eligible_slots_for_accepted_tx.iter().any(|&s| s > 0) {
+            let mut rng = macro_header.seed.rng(VrfUseCase::RewardDistribution);
+            let lookup = DiscreteDistribution::new(&num_eligible_slots_for_accepted_tx);
+            let index = lookup.sample(&mut rng);
+            transactions[index].value += remainder;
+        } else {
+            burned_reward += remainder;
+        }
 
         // Do not create reward transactions for zero rewards
         transactions.retain(|transaction| !transaction.value.is_zero());

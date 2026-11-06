@@ -42,6 +42,8 @@ use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "metrics")]
 use crate::network_metrics::NetworkMetrics;
+#[cfg(feature = "kad")]
+use crate::rate_limiting::RateLimitConfig;
 use crate::{
     autonat::NatStatus,
     behaviour, dht,
@@ -66,6 +68,46 @@ struct EventInfo<'a> {
     dht_verifier: &'a dyn dht::Verifier,
     #[cfg(feature = "metrics")]
     metrics: &'a Arc<NetworkMetrics>,
+}
+
+/// Per-peer rate limit for inbound DHT `PutRecord` requests.
+///
+/// The window matches the Kademlia replication interval configured in
+/// [`Config::new`] (60s). The limit is deliberately generous: the DHT holds at
+/// most a few hundred validator records (`Policy::SLOTS`), so legitimate
+/// replication and caching pushes from a single peer stay well below it, while
+/// a malicious peer is capped to roughly one verification per second.
+#[cfg(feature = "kad")]
+const DHT_PUT_RATE_LIMIT: RateLimitConfig = RateLimitConfig {
+    max_requests: 64,
+    time_window: Duration::from_secs(60),
+};
+
+#[cfg(feature = "kad")]
+fn store_dht_record<K>(
+    dht_get_results: &mut HashMap<K, DhtResults>,
+    id: K,
+    dht_record: DhtRecord,
+) -> u8
+where
+    K: Eq + std::hash::Hash,
+{
+    let results = dht_get_results.entry(id).or_insert_with(|| DhtResults {
+        count: 0,
+        best_value: dht_record.clone(),
+        outdated_values: vec![],
+    });
+
+    results.count += 1;
+
+    if dht_record > results.best_value {
+        results.outdated_values.push(results.best_value.clone());
+        results.best_value = dht_record;
+    } else if dht_record < results.best_value {
+        results.outdated_values.push(dht_record);
+    }
+
+    results.count
 }
 
 pub(crate) fn new_swarm(
@@ -513,13 +555,43 @@ fn handle_dht_event(event: kad::Event, event_info: EventInfo) {
 }
 
 #[cfg(feature = "kad")]
+fn abort_dht_get(
+    id: QueryId,
+    step: ProgressStep,
+    error: NetworkError,
+    reason: &'static str,
+    event_info: &mut EventInfo,
+) {
+    if let Some(mut query) = event_info.swarm.behaviour_mut().dht.query_mut(&id) {
+        query.finish();
+    }
+
+    event_info.state.dht_get_results.remove(&id);
+
+    if let Some(output) = event_info.state.dht_gets.remove(&id) {
+        if output.send(Err(error)).is_err() {
+            error!(query_id = ?id, ?step, "could not send aborted get record query result to channel");
+        }
+    } else {
+        warn!(query_id = ?id, ?step, %reason, "GetRecord query abort for unknown query ID");
+    }
+}
+
+#[cfg(feature = "kad")]
 fn handle_dht_get(
     id: QueryId,
     result: Result<GetRecordOk, GetRecordError>,
     _stats: QueryStats,
     step: ProgressStep,
-    event_info: EventInfo,
+    mut event_info: EventInfo,
 ) {
+    if !event_info.state.dht_gets.contains_key(&id)
+        && !event_info.state.dht_get_results.contains_key(&id)
+    {
+        debug!(query_id = ?id, ?step, "Ignoring stale GetRecord query progress");
+        return;
+    }
+
     match result {
         Ok(GetRecordOk::FoundRecord(record)) => {
             // Verify incoming record
@@ -527,43 +599,29 @@ fn handle_dht_get(
                 Ok(record) => record,
                 Err(error) => {
                     warn!(?error, "DHT record verification failed");
+                    abort_dht_get(
+                        id,
+                        step,
+                        NetworkError::DhtGetVerificationFailed,
+                        "DHT get record verification failed",
+                        &mut event_info,
+                    );
                     return;
                 }
             };
 
-            if step.count.get() == 1_usize {
-                // This is our first record
-                let results = DhtResults {
-                    count: 0, // Will be increased in the next step
-                    best_value: dht_record.clone(),
-                    outdated_values: vec![],
-                };
-                event_info.state.dht_get_results.insert(id, results);
-            }
-
-            // We should always have a stored result
-            let Some(results) = event_info.state.dht_get_results.get_mut(&id) else {
-                log::error!(query_id = ?id, "DHT inconsistent state");
-                return;
-            };
-
-            results.count += 1;
-            // Replace best value if needed and update the outdated values
-            if dht_record > results.best_value {
-                results.outdated_values.push(results.best_value.clone());
-                results.best_value = dht_record;
-            } else if dht_record < results.best_value {
-                results.outdated_values.push(dht_record)
-            }
+            let count = store_dht_record(&mut event_info.state.dht_get_results, id, dht_record);
             // Check if we already have a quorum
-            if results.count == event_info.state.dht_quorum {
-                event_info
-                    .swarm
-                    .behaviour_mut()
-                    .dht
-                    .query_mut(&id)
-                    .unwrap()
-                    .finish();
+            if count == event_info.state.dht_quorum {
+                if let Some(mut query) = event_info.swarm.behaviour_mut().dht.query_mut(&id) {
+                    query.finish();
+                } else {
+                    warn!(
+                        query_id = ?id,
+                        ?step,
+                        "Quorum reached but DHT query already removed from Kademlia pool"
+                    );
+                }
             }
         }
         Ok(GetRecordOk::FinishedWithNoAdditionalRecord { cache_candidates }) => {
@@ -571,7 +629,18 @@ fn handle_dht_get(
             // and push the best result to the cache candidates
 
             let Some(results) = event_info.state.dht_get_results.remove(&id) else {
-                log::error!(query_id = ?id, "DHT inconsistent state");
+                warn!(
+                    query_id = ?id,
+                    "DHT query finished without any verified record"
+                );
+
+                if let Some(output) = event_info.state.dht_gets.remove(&id) {
+                    if output.send(Err(NetworkError::DhtNoValidRecord)).is_err() {
+                        error!(query_id = ?id, error = "receiver hung up", "could not send get record query result to channel");
+                    }
+                } else {
+                    warn!(query_id = ?id, ?step, "GetRecord query result for unknown query ID");
+                }
                 return;
             };
 
@@ -621,6 +690,62 @@ fn handle_dht_get(
     }
 }
 
+#[cfg(all(test, feature = "kad"))]
+mod tests {
+    use std::collections::HashMap;
+
+    use libp2p::kad::{Record, RecordKey};
+    use nimiq_keys::Address;
+    use nimiq_network_interface::validator_record::ValidatorRecord;
+
+    use super::{store_dht_record, DhtRecord, DhtResults};
+
+    fn test_dht_record(timestamp: u64, key_suffix: u8) -> DhtRecord {
+        let peer_id = libp2p::PeerId::random();
+        let validator_record = ValidatorRecord::new(peer_id, Address::default(), timestamp);
+        let record = Record {
+            key: RecordKey::new(&[key_suffix]),
+            value: vec![key_suffix],
+            publisher: Some(peer_id),
+            expires: None,
+        };
+
+        DhtRecord::Validator(peer_id, validator_record, record)
+    }
+
+    #[test]
+    fn stores_first_verified_record_even_if_query_already_progressed() {
+        let mut results = HashMap::<u8, DhtResults>::new();
+        let record = test_dht_record(10, 1);
+
+        let count = store_dht_record(&mut results, 7, record.clone());
+
+        assert_eq!(count, 1);
+
+        let stored = results.get(&7).expect("record should initialize results");
+        assert_eq!(stored.count, 1);
+        assert!(stored.best_value == record);
+        assert!(stored.outdated_values.is_empty());
+    }
+
+    #[test]
+    fn keeps_newest_record_and_tracks_outdated_ones() {
+        let mut results = HashMap::<u8, DhtResults>::new();
+        let older = test_dht_record(10, 1);
+        let newer = test_dht_record(20, 2);
+
+        store_dht_record(&mut results, 3, older.clone());
+        let count = store_dht_record(&mut results, 3, newer.clone());
+
+        assert_eq!(count, 2);
+
+        let stored = results.get(&3).expect("query results should exist");
+        assert_eq!(stored.count, 2);
+        assert!(stored.best_value == newer);
+        assert!(stored.outdated_values == vec![older]);
+    }
+}
+
 #[cfg(feature = "kad")]
 fn handle_dht_put_record(
     id: QueryId,
@@ -664,11 +789,27 @@ fn handle_dht_bootstrap(
 
 #[cfg(feature = "kad")]
 fn handle_dht_inbound_put(
-    _source: PeerId,
+    source: PeerId,
     _connection: ConnectionId,
     record: Record,
     event_info: EventInfo,
 ) {
+    // Rate limit inbound puts per peer before doing any verification work, so a
+    // single peer cannot starve the swarm task with record verifications.
+    if event_info.rate_limiting.exceeds_rate_limit(
+        source,
+        RateLimitId::DhtPutRecord,
+        &DHT_PUT_RATE_LIMIT,
+    ) {
+        debug!(
+            %source,
+            max_requests = %DHT_PUT_RATE_LIMIT.max_requests,
+            time_window = ?DHT_PUT_RATE_LIMIT.time_window,
+            "Dropping DHT PutRecord - rate limit exceeded",
+        );
+        return;
+    }
+
     // Verify incoming record
     let dht_record = match event_info.dht_verifier.verify(&record) {
         Ok(record) => record,
@@ -763,6 +904,26 @@ fn handle_gossipsub_event(event: gossipsub::Event, event_info: EventInfo) {
                     time_window = ?topic_info.rate_limit_config.time_window,
                     "Dropping gossipsub message - rate limit exceeded",
                 );
+                return;
+            }
+
+            if message.data.len() > topic_info.max_message_size {
+                debug!(
+                    %topic,
+                    peer_id = %propagation_source,
+                    message_size = message.data.len(),
+                    max_message_size = topic_info.max_message_size,
+                    "Rejecting gossipsub message - message too large",
+                );
+                event_info
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        gossipsub::MessageAcceptance::Reject,
+                    );
                 return;
             }
 
@@ -1029,9 +1190,10 @@ fn handle_request_response_inbound_failure(
     connection_id: ConnectionId,
     request_id: InboundRequestId,
     error: InboundFailure,
-    _event_info: EventInfo,
+    event_info: EventInfo,
 ) {
     error!(%request_id, %peer_id, %connection_id, %error, "Inbound request failed");
+    event_info.state.response_channels.remove(&request_id);
 }
 
 fn perform_action(action: NetworkAction, swarm: &mut NimiqSwarm, state: &mut TaskState) {
@@ -1083,6 +1245,7 @@ fn perform_action(action: NetworkAction, swarm: &mut NimiqSwarm, state: &mut Tas
             validate,
             output,
             rate_limit_config,
+            max_message_size,
         } => {
             let topic = gossipsub::IdentTopic::new(topic_name.clone());
 
@@ -1097,6 +1260,7 @@ fn perform_action(action: NetworkAction, swarm: &mut NimiqSwarm, state: &mut Tas
                             output: tx,
                             validate,
                             rate_limit_config,
+                            max_message_size,
                         },
                     );
 
@@ -1226,11 +1390,24 @@ fn perform_action(action: NetworkAction, swarm: &mut NimiqSwarm, state: &mut Tas
             // The request initiator might no longer exist, so we silently ignore any errors here.
             output.send(result).ok();
         }
-        NetworkAction::ListenOn { listen_addresses } => {
-            for listen_address in listen_addresses {
-                Swarm::listen_on(swarm, listen_address)
-                    .expect("Failed to listen on provided address");
+        NetworkAction::ListenOn {
+            listen_addresses,
+            output,
+        } => {
+            let mut listener_ids = vec![];
+            let result = listen_addresses.into_iter().try_for_each(|address| {
+                let listener_id = Swarm::listen_on(swarm, address.clone())
+                    .map_err(|error| NetworkError::Listen { address, error })?;
+                listener_ids.push(listener_id);
+                Ok(())
+            });
+            if result.is_err() {
+                // Close the listeners opened before the failing address.
+                for listener_id in listener_ids {
+                    swarm.remove_listener(listener_id);
+                }
             }
+            output.send(result).ok();
         }
         NetworkAction::StartConnecting => {
             swarm.behaviour_mut().pool.start_connecting();

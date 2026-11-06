@@ -4,6 +4,7 @@ version.workspace = true
 authors = ["Janosch Gräf <janosch@nimiq.com>", "The Nimiq Core Development Team <info@nimiq.com>"]
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Nimiq implementation of the handel protocol"
 homepage.workspace = true
 repository.workspace = true
@@ -14,14 +15,13 @@ keywords.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
 futures = { workspace = true }
-hashlink = "0.11"
+hashlink = "0.12"
 log = { workspace = true }
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 parking_lot = "0.12"
 thiserror = "2.0"
-tokio = { version = "1.49", features = ["rt"] }
+tokio = { version = "1.52", features = ["rt"] }
 
 nimiq-bls = { workspace = true }
 nimiq-collections = { workspace = true }
@@ -31,9 +31,9 @@ nimiq-time = { workspace = true }
 nimiq-utils = { workspace = true, features = ["futures"] }
 
 [dev-dependencies]
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"
-tokio = { version = "1.49", features = ["rt", "time", "macros"] }
+tokio = { version = "1.52", features = ["rt", "time", "macros"] }
 
 nimiq-network-interface = { workspace = true }
 nimiq-network-mock = { workspace = true }

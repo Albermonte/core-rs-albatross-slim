@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Account primitives to be used in Nimiq's Albatross implementation"
 homepage.workspace = true
 repository.workspace = true
@@ -17,7 +18,7 @@ workspace = true
 hex = "0.4"
 log = { workspace = true }
 parking_lot = "0.12"
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"
 thiserror = "2.0"
 
@@ -38,7 +39,7 @@ nimiq-vrf = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"
-tempfile = "3.24"
+tempfile = "3.27"
 
 nimiq-genesis-builder = { workspace = true }
 nimiq-test-log = { workspace = true }

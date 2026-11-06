@@ -17,6 +17,12 @@ pub enum NetworkCommand {
         #[clap(short, long)]
         count: bool,
     },
+
+    /// Returns a list of known peers (peer ID and its stored information).
+    AddressBook {},
+
+    /// Returns the version of the client the RPC server is running.
+    Version {},
 }
 
 #[async_trait]
@@ -32,6 +38,12 @@ impl HandleSubcommand for NetworkCommand {
                 } else {
                     println!("{:#?}", client.network.get_peer_list().await?);
                 }
+            }
+            NetworkCommand::AddressBook {} => {
+                println!("{:#?}", client.network.get_address_book().await?);
+            }
+            NetworkCommand::Version {} => {
+                println!("{:#?}", client.network.get_client_version().await?);
             }
         }
         Ok(client)

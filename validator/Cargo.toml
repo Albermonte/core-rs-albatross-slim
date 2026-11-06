@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Validator logic of Albatross"
 homepage.workspace = true
 repository.workspace = true
@@ -18,18 +19,17 @@ maintenance = { status = "experimental" }
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
 byteorder = "1.5"
 futures = { workspace = true }
-hashlink = "0.11"
+hashlink = "0.12"
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 log = { workspace = true }
 parking_lot = "0.12"
-rand = "0.9"
-rayon = "1.11"
+rand = "0.10"
+rayon = "1.12"
 serde = "1.0"
-tokio = { version = "1.49", features = ["rt", "time", "tracing"] }
-tokio-metrics = "0.4"
+tokio = { version = "1.52", features = ["rt", "time", "tracing"] }
+tokio-metrics = "0.5"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 nimiq-account = { workspace = true }
@@ -54,13 +54,13 @@ nimiq-serde = { workspace = true }
 nimiq-tendermint = { workspace = true }
 nimiq-time = { workspace = true }
 nimiq-transaction-builder = { workspace = true }
-nimiq-utils = { workspace = true, features = ["futures", "time"] }
+nimiq-utils = { workspace = true, features = ["futures", "spawn", "time"] }
 nimiq-validator-network = { workspace = true }
 nimiq-vrf = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"
-tokio = { version = "1.49", features = ["rt", "test-util", "time", "tracing"] }
+tokio = { version = "1.52", features = ["rt", "test-util", "time", "tracing"] }
 tracing-core = "0.1"
 tracing-subscriber = "0.3"
 
@@ -72,9 +72,17 @@ nimiq-test-log = { workspace = true }
 # This adds a circular dev-dependency which is fine but breaks VS code rust-analyzer.
 # See https://github.com/rust-analyzer/rust-analyzer/issues/14167
 nimiq-test-utils = { workspace = true }
-nimiq-zkp-component = { workspace = true }
+nimiq-transaction = { workspace = true }
+# Self dev-dependency so that this crate's own tests are built with the
+# `test-accessors` feature enabled (which exposes test-only accessors). This does not
+# affect regular `cargo build`, where dev-dependencies are not compiled.
+nimiq-validator = { path = ".", features = ["test-accessors"] }
 
 [features]
 expensive-tests = []
 metrics = ["nimiq-mempool/metrics", "nimiq-mempool-task/metrics"]
+# Exposes additional accessors used only by tests (e.g. `Validator::macro_state`).
+# This feature is not meant to be enabled in production builds. It is turned on
+# automatically for this crate's own tests via the self dev-dependency above.
+test-accessors = []
 trusted_push = []

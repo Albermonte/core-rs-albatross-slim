@@ -46,6 +46,8 @@ pub trait AbstractBlockchain {
         self.election_head().hash()
     }
 
+    fn protocol_version(&self) -> u16;
+
     /// Returns the block number at the head of the main chain.
     fn block_number(&self) -> u32 {
         self.head().block_number()
@@ -132,6 +134,15 @@ pub trait AbstractBlockchain {
                 .filter(|slot| !disabled_slots.contains(*slot as usize))
                 .collect()
         };
+
+        // A malformed `disabled_slots` set can disable every in-range slot while having a
+        // popcount != Policy::SLOTS (e.g. by carrying extra out-of-range bits), which leaves
+        // `slots` empty and turns the `offset % slots.len()` below into a division by zero.
+        // Treat an empty viable set like the all-disabled case and accept any slot so that no
+        // input can crash the node
+        if slots.is_empty() {
+            slots = (0..Policy::SLOTS).collect();
+        }
 
         // Shuffle the slots vector using the Fisher–Yates shuffle.
         for i in (1..slots.len()).rev() {

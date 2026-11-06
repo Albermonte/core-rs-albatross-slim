@@ -93,6 +93,16 @@ impl SignatureProof {
         self.compute_signer() == *address
     }
 
+    /// Returns whether this proof's public key is the all-zero (default) Ed25519 key.
+    ///
+    /// That key is a low-order curve point for which the all-zero signature verifies
+    /// against any message (see [`nimiq_keys::Ed25519PublicKey::verify`]), making the
+    /// default `SignatureProof` a verification wildcard. It must never be accepted as a
+    /// signer.
+    pub fn is_default_public_key(&self) -> bool {
+        self.public_key == PublicKey::Ed25519(Ed25519PublicKey::default())
+    }
+
     pub fn verify(&self, message: &[u8]) -> bool {
         if self.webauthn_fields.is_some() {
             self.verify_webauthn(message)
@@ -448,8 +458,8 @@ mod serde_derive {
 
             // When present, serialize webauthn fields flattened into the root struct. The option variant is
             // encoded in the `type` field.
-            if self.webauthn_fields.is_some() {
-                state.serialize_field(FIELDS[4], self.webauthn_fields.as_ref().unwrap())?;
+            if let Some(webauthn_fields) = &self.webauthn_fields {
+                state.serialize_field(FIELDS[4], webauthn_fields)?;
             }
 
             state.end()

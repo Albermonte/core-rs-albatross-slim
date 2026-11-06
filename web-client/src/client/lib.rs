@@ -4,6 +4,7 @@ use std::{
         hash_map::{Entry, HashMap},
         HashSet,
     },
+    mem,
     rc::Rc,
     str::FromStr,
     time::Duration,
@@ -22,7 +23,7 @@ pub use nimiq::{
 };
 use nimiq_blockchain_interface::{AbstractBlockchain, BlockchainEvent};
 use nimiq_bls::LazyPublicKey;
-use nimiq_consensus::ConsensusEvent;
+use nimiq_consensus::{messages::AddressNotification, ConsensusEvent};
 use nimiq_hash::Blake2bHash;
 use nimiq_network_interface::{
     network::{CloseReason, Network, NetworkEvent},
@@ -30,7 +31,7 @@ use nimiq_network_interface::{
 };
 use nimiq_primitives::policy::Policy;
 use nimiq_time::timeout;
-use nimiq_utils::spawn_local;
+use nimiq_utils::{spawn_local, CARGO_VERSION};
 use tokio::sync::oneshot;
 use tsify::Tsify;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -39,9 +40,9 @@ use web_sys::MessageEvent;
 use crate::{
     client::{
         account::{
-            PlainAccount, PlainAccountArrayType, PlainAccountType, PlainStaker,
-            PlainStakerArrayType, PlainStakerType, PlainValidator, PlainValidatorArrayType,
-            PlainValidatorType,
+            PlainAccount, PlainAccountArrayType, PlainAccountType, PlainElectedValidator,
+            PlainElectedValidatorArrayType, PlainStaker, PlainStakerArrayType, PlainStakerType,
+            PlainValidator, PlainValidatorArrayType, PlainValidatorType,
         },
         block::{PlainBlock, PlainBlockType},
         bls_cache::BlsCache,
@@ -63,6 +64,59 @@ use crate::{
 
 /// Maximum number of transactions that can be requested by address
 pub const MAX_TRANSACTIONS_BY_ADDRESS: u16 = 500;
+
+/// Maximum number of transaction receipts that are kept around while waiting for the blockchain to
+/// reach the block they refer to
+const MAX_PENDING_RECEIPTS: usize = 128;
+
+/// Events that drive the processing of transaction receipts
+enum TransactionEvent {
+    /// A notification with transaction receipts was received from a peer
+    Notification(AddressNotification),
+    /// The blockchain head changed, so previously deferred receipts might be provable now
+    BlockchainChanged,
+}
+
+/// Splits the receipts of an address notification into the ones that can be proven right away and
+/// the ones that need to be deferred until the blockchain has caught up with them.
+///
+/// Anybody can publish on our address subscription subtopic, so receipts are never waited for
+/// unconditionally: only those within one batch of our head are deferred, receipts further into the
+/// future are dropped.
+fn triage_receipts(
+    receipts: Vec<(Blake2bHash, u32)>,
+    current_block_number: u32,
+) -> (Vec<(Blake2bHash, u32)>, Vec<(Blake2bHash, u32)>) {
+    let max_block_number = current_block_number + Policy::blocks_per_batch();
+    let mut provable = vec![];
+    let mut deferred = vec![];
+
+    for (hash, block_number) in receipts {
+        if block_number <= current_block_number {
+            provable.push((hash, block_number));
+        } else if block_number <= max_block_number {
+            log::debug!(
+                block_number,
+                current_block_number,
+                "Received transaction receipt from the future, deferring it until the blockchain head is updated"
+            );
+            deferred.push((hash, block_number));
+        } else {
+            log::debug!(
+                block_number,
+                current_block_number,
+                "Dropping transaction receipt from the far future"
+            );
+        }
+    }
+
+    (provable, deferred)
+}
+
+fn is_transaction_expired(validity_start_height: u32, current_height: u32) -> bool {
+    validity_start_height
+        <= current_height.saturating_sub(Policy::transaction_validity_window_blocks())
+}
 
 /// Describes the state of consensus of the client.
 #[derive(Tsify)]
@@ -191,9 +245,6 @@ impl Client {
         let consensus = client.take_consensus().unwrap();
         log::info!("Spawning consensus");
         spawn_local(consensus);
-
-        let zkp_component = client.take_zkp_component().unwrap();
-        spawn_local(zkp_component);
 
         let bls_cache = BlsCache::new().await;
 
@@ -358,10 +409,23 @@ impl Client {
         }
     }
 
+    /// Returns the version of the web client, including a `+dirty` build-metadata
+    /// suffix when it was built from a Git work tree with uncommitted changes.
+    #[wasm_bindgen(js_name = getVersion)]
+    pub async fn get_version(&self) -> String {
+        CARGO_VERSION.to_string()
+    }
+
     /// Returns the network ID that the client is connecting to.
     #[wasm_bindgen(js_name = getNetworkId)]
     pub async fn get_network_id(&self) -> u8 {
         self.network_id
+    }
+
+    /// Returns the blockchain protocol version the client currently uses to verify transactions.
+    #[wasm_bindgen(js_name = getProtocolVersion)]
+    pub async fn get_protocol_version(&self) -> u16 {
+        self.inner.protocol_version()
     }
 
     /// Returns if the client currently has consensus with the network.
@@ -547,6 +611,29 @@ impl Client {
         Ok(serde_wasm_bindgen::to_value(&plain_validators)?.into())
     }
 
+    /// Returns the validators elected for the current epoch, together with the number of validator
+    /// slots assigned to each of them.
+    ///
+    /// The slot distribution is fixed for the duration of an epoch and is the metric used on-chain
+    /// to evaluate support for protocol upgrades. Combine this with {@link Client.getValidators} to
+    /// relate slot counts to each validator's stake and signal data.
+    ///
+    /// Throws if the elected validators are not available (e.g. before consensus is established).
+    #[wasm_bindgen(js_name = getElectedValidators)]
+    pub async fn get_elected_validators(&self) -> Result<PlainElectedValidatorArrayType, JsError> {
+        let consensus_proxy = self.inner.consensus_proxy();
+        let blockchain = consensus_proxy.blockchain.read();
+        let validators = blockchain
+            .current_validators()
+            .ok_or_else(|| JsError::new("No elected validators available"))?;
+        let elected: Vec<PlainElectedValidator> = validators
+            .validators
+            .iter()
+            .map(PlainElectedValidator::from)
+            .collect();
+        Ok(serde_wasm_bindgen::to_value(&elected)?.into())
+    }
+
     /// Sends a transaction to the network and returns {@link PlainTransactionDetails}.
     ///
     /// Throws in case of network errors.
@@ -564,7 +651,8 @@ impl Client {
         &self,
         tx: Transaction,
     ) -> Result<PlainTransactionDetails, JsError> {
-        tx.verify(Some(self.network_id))?;
+        let protocol_version = self.inner.protocol_version();
+        tx.verify(protocol_version, Some(self.network_id))?;
 
         // First, check if the transaction is already included
 
@@ -935,9 +1023,7 @@ impl Client {
                 continue;
             }
 
-            if details.transaction.validity_start_height
-                <= current_height - Policy::transaction_validity_window()
-            {
+            if is_transaction_expired(details.transaction.validity_start_height, current_height) {
                 // Transaction expired before getting included.
                 let mut expired_details = details.clone();
                 expired_details.state = TransactionState::Expired;
@@ -1116,6 +1202,9 @@ impl Client {
                         Some(BlockchainEvent::Stored(block)) => {
                             (block.hash(), "stored", Array::new(), Vec::new())
                         }
+                        Some(BlockchainEvent::ProtocolUpgrade(hash, _version)) => {
+                            (hash.clone(), "protocol-upgrade", Array::new(), Vec::new())
+                        }
                         None => {
                             break;
                         }
@@ -1253,30 +1342,56 @@ impl Client {
         let transaction_oneshots = Rc::clone(&self.transaction_oneshots);
 
         spawn_local(async move {
-            let mut address_notifications = consensus.subscribe_address_notifications().await;
+            let address_notifications = consensus.subscribe_address_notifications().await;
+            let blockchain_events = consensus.blockchain.read().notifier_as_stream();
 
-            while let Some((notification, _)) = address_notifications.next().await {
-                {
-                    loop {
-                        let current_block_number =
-                            consensus.blockchain.read().head().block_number();
-                        if notification
-                            .receipts
-                            .iter()
-                            .any(|(_, block_number)| block_number > &current_block_number)
-                        {
-                            log::debug!("Received transaction receipt(s) from the future, waiting for the blockchain head to be updated...");
-                            let mut blockchain_events =
-                                consensus.blockchain.read().notifier_as_stream();
-                            let _ = blockchain_events.next().await;
-                        } else {
-                            break;
+            // Both sources are merged into a single stream so that processing one of them can never
+            // block the processing of the other one
+            let mut events = futures::stream::select(
+                address_notifications
+                    .map(|(notification, _)| TransactionEvent::Notification(notification)),
+                blockchain_events.map(|_| TransactionEvent::BlockchainChanged),
+            );
+
+            // Receipts that refer to blocks we have not adopted yet. They are retried whenever the
+            // blockchain advances
+            let mut pending_receipts: Vec<(Blake2bHash, u32)> = vec![];
+
+            while let Some(event) = events.next().await {
+                let current_block_number = consensus.blockchain.read().head().block_number();
+
+                let receipts = match event {
+                    TransactionEvent::Notification(notification) => {
+                        let (receipts, deferred) =
+                            triage_receipts(notification.receipts, current_block_number);
+
+                        for receipt in deferred {
+                            if pending_receipts.len() < MAX_PENDING_RECEIPTS {
+                                pending_receipts.push(receipt);
+                            } else {
+                                log::debug!(
+                                    "Too many pending transaction receipts, dropping receipt"
+                                );
+                            }
                         }
+
+                        receipts
                     }
+                    TransactionEvent::BlockchainChanged => {
+                        let (receipts, still_pending) = mem::take(&mut pending_receipts)
+                            .into_iter()
+                            .partition(|(_, block_number)| *block_number <= current_block_number);
+                        pending_receipts = still_pending;
+
+                        receipts
+                    }
+                };
+
+                if receipts.is_empty() {
+                    continue;
                 }
 
-                let receipts = notification
-                    .receipts
+                let receipts = receipts
                     .into_iter()
                     .map(|(hash, block_number)| (hash, Some(block_number)))
                     .collect();
@@ -1348,6 +1463,111 @@ impl Client {
         id += 1;
         self.listener_id.set(id);
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nimiq_hash::Blake2bHash;
+    use nimiq_primitives::policy::{Policy, TEST_POLICY};
+
+    use super::{is_transaction_expired, triage_receipts};
+
+    #[test]
+    fn receipts_from_the_far_future_are_dropped() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+
+        let current_block_number = 10_000;
+        let hash = Blake2bHash::default();
+
+        // A single receipt from the far future used to block the notification stream forever
+        let (provable, deferred) =
+            triage_receipts(vec![(hash.clone(), u32::MAX)], current_block_number);
+        assert!(provable.is_empty());
+        assert!(deferred.is_empty(), "far future receipts must not be kept");
+
+        // Receipts within one batch of our head are deferred until the blockchain catches up
+        let next_batch = current_block_number + Policy::blocks_per_batch();
+        let (provable, deferred) = triage_receipts(
+            vec![
+                (hash.clone(), current_block_number),
+                (hash.clone(), current_block_number + 1),
+                (hash.clone(), next_batch),
+                (hash.clone(), next_batch + 1),
+            ],
+            current_block_number,
+        );
+        assert_eq!(provable, vec![(hash.clone(), current_block_number)]);
+        assert_eq!(
+            deferred,
+            vec![(hash.clone(), current_block_number + 1), (hash, next_batch)]
+        );
+    }
+
+    #[test]
+    fn expiry_check_uses_block_count_not_batch_count() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+
+        let batch_window = Policy::transaction_validity_window();
+        let block_window = Policy::transaction_validity_window_blocks();
+
+        assert_ne!(
+            batch_window, block_window,
+            "batch window ({batch_window}) and block window ({block_window}) must differ"
+        );
+        assert_eq!(
+            block_window,
+            batch_window * Policy::blocks_per_batch(),
+            "block window should be batch_window * blocks_per_batch"
+        );
+
+        let validity_start_height = 10_000;
+        let blocks_elapsed = batch_window + 1;
+        let current_height = validity_start_height + blocks_elapsed;
+
+        assert!(
+            blocks_elapsed < block_window,
+            "transaction should still be within the block validity window"
+        );
+        assert!(
+            blocks_elapsed > batch_window,
+            "transaction should be outside the batch window to exercise the bug"
+        );
+
+        assert!(
+            !is_transaction_expired(validity_start_height, current_height),
+            "pending transaction should not expire while it is still inside the block-based validity window"
+        );
+    }
+
+    #[test]
+    fn expiry_boundary_conditions_match_block_window() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+
+        let block_window = Policy::transaction_validity_window_blocks();
+        let current_height = 20_000;
+        let test_cases = [
+            (0, false),
+            (Policy::transaction_validity_window() - 1, false),
+            (Policy::transaction_validity_window(), false),
+            (Policy::transaction_validity_window() + 1, false),
+            (block_window / 2, false),
+            (block_window - 1, false),
+            (block_window, true),
+            (block_window + 1, true),
+        ];
+
+        for (blocks_elapsed, should_be_expired) in test_cases {
+            let validity_start_height = current_height - blocks_elapsed;
+
+            assert_eq!(
+                is_transaction_expired(validity_start_height, current_height),
+                should_be_expired,
+                "transaction {} blocks old should{} be expired",
+                blocks_elapsed,
+                if should_be_expired { "" } else { " not" },
+            );
+        }
     }
 }
 

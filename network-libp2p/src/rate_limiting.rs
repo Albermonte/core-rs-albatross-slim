@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{hash_map::Entry, BTreeSet, HashMap},
     time::Duration,
 };
 
@@ -41,6 +41,10 @@ impl RateLimitConfig {
 pub(crate) enum RateLimitId {
     Request(RequestType),
     Gossipsub(TopicHash),
+    /// Inbound DHT `PutRecord` requests. Rate limited per peer so a single peer
+    /// cannot flood the swarm task with record verifications.
+    #[cfg(feature = "kad")]
+    DhtPutRecord,
 }
 
 /// Holds the expiration time for a given peer and request type. This struct defines the ordering for the btree set.
@@ -93,9 +97,21 @@ pub(crate) struct PendingDeletion {
 }
 
 impl PendingDeletion {
-    /// Retrieves the first item by expiration.
-    pub(crate) fn first(&self) -> Option<&Expiration> {
-        self.by_expiration_time.first()
+    fn pop_first_if_expired(&mut self, current_time: Instant) -> Option<Expiration> {
+        if self.by_expiration_time.first()?.expiration_time > current_time {
+            return None;
+        }
+        let expiration = self
+            .by_expiration_time
+            .pop_first()
+            .expect("First item must exist");
+        assert!(
+            self.by_peer_and_id
+                .remove(&(expiration.peer_id, expiration.rate_limit_id.clone()))
+                .is_some(),
+            "The pending for deletion rate limits should be consistent among them"
+        );
+        Some(expiration)
     }
 
     /// Adds to both structures the new entry. If the entry already exists we replace it on both structs.
@@ -118,18 +134,6 @@ impl PendingDeletion {
             rate_limit_id,
             rate_limit.next_reset_time(),
         ));
-    }
-
-    /// Removes the first item by expiration date, on both structures.
-    pub(crate) fn remove_first(&mut self) {
-        if let Some(expiration) = self.by_expiration_time.pop_first() {
-            assert!(
-                self.by_peer_and_id
-                    .remove(&(expiration.peer_id, expiration.rate_limit_id))
-                    .is_some(),
-                "The pending for deletion rate limits should be consistent among them"
-            )
-        }
     }
 }
 
@@ -219,14 +223,16 @@ impl RateLimits {
     /// Mark all rate limits of a given peer as pending for deletion.
     /// Every time this is called the expired rate limits will get delete pruned.
     pub(crate) fn remove_rate_limits(&mut self, peer_id: PeerId) {
+        // Get a single timestamp as reference time.
+        let current_time = Instant::now();
         // Every time a peer disconnects, we delete all expired pending limits.
-        self.clean_up();
+        self.clean_up(current_time);
 
         // Go through all existing request types of the given peer and deletes the limit counters if possible or marks it for deletion.
         if let Some(rate_limits) = self.rate_limits.get_mut(&peer_id) {
             rate_limits.retain(|rate_limit_id, rate_limit| {
                 // Gets the requests limit and deletes it if no counter info would be lost, otherwise places it as pending deletion.
-                if !rate_limit.can_delete(Instant::now()) {
+                if !rate_limit.can_delete(current_time) {
                     self.rate_limits_pending_deletion.insert(
                         peer_id,
                         rate_limit_id.clone(),
@@ -245,45 +251,207 @@ impl RateLimits {
     }
 
     /// Deletes the rate limits that were previously marked as pending if its expiration time has passed.
-    fn clean_up(&mut self) {
+    fn clean_up(&mut self, current_time: Instant) {
         // Iterates from the oldest to the most recent expiration date and deletes the entries that have expired.
         // The pending to deletion is ordered from the oldest to the most recent expiration date, thus we break early
         // from the loop once we find a non expired rate limit.
-        while let Some(expiration) = self.rate_limits_pending_deletion.first() {
-            let current_timestamp = Instant::now();
-            if expiration.expiration_time <= current_timestamp {
-                if let Some(rate_limits) =
-                    self.rate_limits
-                        .get_mut(&expiration.peer_id)
-                        .and_then(|rate_limits| {
-                            if let Some(rate_limit) = rate_limits.get(&expiration.rate_limit_id) {
-                                // If the peer has reconnected the rate limit may be enforcing a new limit. In this case we only remove
-                                // the pending deletion.
-                                if rate_limit.can_delete(current_timestamp) {
-                                    rate_limits.remove(&expiration.rate_limit_id);
-                                }
-                                return Some(rate_limits);
-                            }
-                            // Only returns None if no request type was found.
-                            None
-                        })
-                {
-                    // If the peer no longer has any pending rate limits, then it gets removed from both rate limits and pending deletion.
-                    if rate_limits.is_empty() {
-                        self.rate_limits.remove(&expiration.peer_id);
-                    }
-                } else {
-                    // If the information is in pending deletion, that should mean it was not deleted from peer_request_limits yet, so that
-                    // reconnection doesn't bypass the limits we are enforcing.
-                    unreachable!(
-                        "Tried to remove a non existing rate limit from peer_request_limits."
-                    );
-                }
-                // Removes the entry from the pending for deletion.
-                self.rate_limits_pending_deletion.remove_first();
-            } else {
-                break;
+        while let Some(expiration) = self
+            .rate_limits_pending_deletion
+            .pop_first_if_expired(current_time)
+        {
+            // For the tagged pending expiration, retrieve the rate limit of the related peer
+            let Entry::Occupied(mut rate_limit_for_peer) =
+                self.rate_limits.entry(expiration.peer_id)
+            else {
+                log::error!(
+                    ?expiration,
+                    "Tried to retrieve a non existing rate limit for a peer, which should exist"
+                );
+                // fail in debug builds, so the broken invariant surfaces
+                debug_assert!(
+                    false,
+                    "Tried to retrieve a non existing rate limit for a peer, which should exist: {:?}",
+                    expiration,
+                );
+                // Something broke the invariant here, but there is good reason to believe
+                // this will self correct after the pop of the while loop above.
+                continue;
+            };
+            //
+            let Entry::Occupied(rate_limit) = rate_limit_for_peer
+                .get_mut()
+                .entry(expiration.rate_limit_id.clone())
+            else {
+                log::error!(
+                    ?expiration,
+                    "Tried to retrieve a non existing rate limit for an id, which should exist"
+                );
+                // fail in debug builds, so the broken invariant surfaces
+                debug_assert!(
+                    false,
+                    "Tried to retrieve a non existing rate limit for an id, which should exist: {:?}",
+                    expiration,
+                );
+                // Something broke the invariant here, but there is good reason to believe
+                // this will self correct after the pop of the while loop above.
+                continue;
+            };
+
+            if rate_limit.get().can_delete(current_time) {
+                rate_limit.remove_entry();
+            }
+            if rate_limit_for_peer.get().is_empty() {
+                rate_limit_for_peer.remove_entry();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hint::spin_loop;
+
+    use super::*;
+
+    fn rate_limit_with_expiration(expiration_time: Instant) -> RateLimit {
+        let time_window = Duration::from_millis(10);
+        let mut rate_limit = RateLimit::new(1, time_window, expiration_time - time_window);
+        rate_limit.occurrences_counter = 1;
+        rate_limit
+    }
+
+    fn rate_limits_with_pending_entry(
+        peer_id: PeerId,
+        rate_limit_id: RateLimitId,
+        rate_limit: RateLimit,
+        capacity: usize,
+    ) -> RateLimits {
+        let mut rate_limits = RateLimits::default();
+        let mut peer_rate_limits = HashMap::with_capacity(capacity);
+        peer_rate_limits.insert(rate_limit_id.clone(), rate_limit.clone());
+        rate_limits.rate_limits.insert(peer_id, peer_rate_limits);
+        rate_limits
+            .rate_limits_pending_deletion
+            .insert(peer_id, rate_limit_id, &rate_limit);
+        rate_limits
+    }
+
+    fn wait_until(target: Instant) {
+        while Instant::now() < target {
+            spin_loop();
+        }
+    }
+
+    #[test]
+    fn remove_rate_limits_keeps_pending_deletions_consistent_at_expiry_boundary() {
+        const INNER_CAPACITY: usize = 1 << 17;
+        const START_OFFSETS: [Duration; 6] = [
+            Duration::from_micros(2),
+            Duration::from_micros(4),
+            Duration::from_micros(8),
+            Duration::from_micros(16),
+            Duration::from_micros(32),
+            Duration::from_micros(64),
+        ];
+
+        let peer_id = PeerId::random();
+        let cleanup_peer_id = PeerId::random();
+        let rate_limit_id = RateLimitId::Request(RequestType::request(42));
+        let mut observed_pre_expiry_disconnect = false;
+
+        for start_offset in START_OFFSETS {
+            let expiration_time = Instant::now() + start_offset + Duration::from_millis(1);
+            let rate_limit = rate_limit_with_expiration(expiration_time);
+            let mut rate_limits = rate_limits_with_pending_entry(
+                peer_id,
+                rate_limit_id.clone(),
+                rate_limit,
+                INNER_CAPACITY,
+            );
+
+            wait_until(expiration_time - start_offset);
+            rate_limits.remove_rate_limits(peer_id);
+
+            let has_active_rate_limit = rate_limits
+                .rate_limits
+                .get(&peer_id)
+                .and_then(|peer_rate_limits| peer_rate_limits.get(&rate_limit_id))
+                .is_some();
+            let has_pending_deletion = rate_limits
+                .rate_limits_pending_deletion
+                .by_peer_and_id
+                .contains_key(&(peer_id, rate_limit_id.clone()));
+
+            assert!(
+                !has_pending_deletion || has_active_rate_limit,
+                "disconnecting close to expiry must not leave a pending-deletion entry without the matching active rate limit",
+            );
+
+            if has_active_rate_limit {
+                observed_pre_expiry_disconnect = true;
+
+                wait_until(expiration_time + Duration::from_millis(1));
+                rate_limits.remove_rate_limits(cleanup_peer_id);
+
+                assert!(
+                    !rate_limits.rate_limits.contains_key(&peer_id),
+                    "the active rate limit should be removed once the pending deletion expires",
+                );
+                assert!(
+                    !rate_limits
+                        .rate_limits_pending_deletion
+                        .by_peer_and_id
+                        .contains_key(&(peer_id, rate_limit_id.clone())),
+                    "the pending-deletion index should be cleared once the rate limit expires",
+                );
+                assert!(
+                    !rate_limits
+                        .rate_limits_pending_deletion
+                        .by_expiration_time
+                        .iter()
+                        .any(|expiration| {
+                            expiration.peer_id == peer_id
+                                && expiration.rate_limit_id == rate_limit_id
+                        }),
+                    "the expiration index should be cleared once the rate limit expires",
+                );
+            }
+        }
+
+        assert!(
+            observed_pre_expiry_disconnect,
+            "the test must exercise at least one disconnect that happens before the rate limit expires",
+        );
+    }
+
+    #[cfg(feature = "kad")]
+    #[test]
+    fn dht_put_rate_limit_is_enforced_per_peer() {
+        let config = RateLimitConfig {
+            max_requests: 3,
+            time_window: Duration::from_secs(60),
+        };
+        let peer_id = PeerId::random();
+        let mut rate_limits = RateLimits::default();
+
+        // The first `max_requests` puts from a peer are allowed.
+        for _ in 0..config.max_requests {
+            assert!(
+                !rate_limits.exceeds_rate_limit(peer_id, RateLimitId::DhtPutRecord, &config),
+                "puts within the limit must be allowed",
+            );
+        }
+
+        // Any further put within the same window is dropped.
+        assert!(
+            rate_limits.exceeds_rate_limit(peer_id, RateLimitId::DhtPutRecord, &config),
+            "puts exceeding the limit must be dropped",
+        );
+
+        // The limit is tracked per peer, so a different peer is unaffected.
+        assert!(
+            !rate_limits.exceeds_rate_limit(PeerId::random(), RateLimitId::DhtPutRecord, &config),
+            "a different peer must have its own independent rate limit",
+        );
     }
 }

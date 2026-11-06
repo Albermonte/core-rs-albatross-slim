@@ -28,7 +28,7 @@ use nimiq_test_utils::{
     transactions::{IncomingType, OutgoingType, TransactionsGenerator, ValidatorState},
 };
 use nimiq_transaction::{inherent::Inherent, SignatureProof, Transaction};
-use rand::Rng;
+use rand::RngExt;
 use tempfile::tempdir;
 
 const VOLATILE_ENV: bool = true;
@@ -41,7 +41,7 @@ fn it_can_commit_and_revert_a_block_body() {
     let address_recipient = Address::from([2u8; Address::SIZE]);
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: address_validator.clone(),
         target: address_validator.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
@@ -53,7 +53,7 @@ fn it_can_commit_and_revert_a_block_body() {
         Account::default(),
     );
 
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
 
     let receipts = accounts
         .commit_and_test(
@@ -80,7 +80,7 @@ fn it_can_commit_and_revert_a_block_body() {
         Coin::from_u64_unchecked(10),
         Coin::ZERO,
         1,
-        NetworkId::MainAlbatross,
+        NetworkId::UnitAlbatross,
     );
 
     let transactions = vec![tx];
@@ -94,7 +94,7 @@ fn it_can_commit_and_revert_a_block_body() {
         Account::default()
     );
 
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
 
     let receipts = accounts
         .commit_and_test(
@@ -152,24 +152,24 @@ fn it_can_commit_and_revert_a_block_body() {
 fn it_correctly_rewards_validators() {
     let accounts = TestCommitRevert::new();
 
-    let address_validator_1 = Address::from([1u8; Address::SIZE]);
-    let address_validator_2 = Address::from([2u8; Address::SIZE]);
-    let address_recipient_1 = Address::from([3u8; Address::SIZE]);
-    let address_recipient_2 = Address::from([4u8; Address::SIZE]);
+    let validator_address_1 = Address::from([1u8; Address::SIZE]);
+    let validator_address_2 = Address::from([2u8; Address::SIZE]);
+    let recipient_address_1 = Address::from([3u8; Address::SIZE]);
+    let recipient_address_2 = Address::from([4u8; Address::SIZE]);
 
     // Validator 1 mines first block.
     assert_eq!(
-        accounts.get_complete(&address_validator_1, None),
+        accounts.get_complete(&validator_address_1, None),
         Account::default(),
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
-        target: address_validator_1.clone(),
+        validator_address: validator_address_1.clone(),
+        target: validator_address_1.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
 
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
 
     assert!(accounts
         .commit_and_test(&[], &[reward], &block_state, &mut BlockLogger::empty())
@@ -177,7 +177,7 @@ fn it_correctly_rewards_validators() {
 
     // Create transactions to Recipient 1 and Recipient 2.
     assert_eq!(
-        accounts.get_complete(&address_validator_1, None).balance(),
+        accounts.get_complete(&validator_address_1, None).balance(),
         Coin::from_u64_unchecked(10000)
     );
 
@@ -187,36 +187,36 @@ fn it_correctly_rewards_validators() {
     let fee2 = Coin::from_u64_unchecked(11);
 
     let tx1 = Transaction::new_basic(
-        address_validator_1.clone(),
-        address_recipient_1.clone(),
+        validator_address_1.clone(),
+        recipient_address_1.clone(),
         value1,
         fee1,
         2,
-        NetworkId::MainAlbatross,
+        NetworkId::UnitAlbatross,
     );
 
     let tx2 = Transaction::new_basic(
-        address_validator_1.clone(),
-        address_recipient_2.clone(),
+        validator_address_1.clone(),
+        recipient_address_2.clone(),
         value2,
         fee2,
         2,
-        NetworkId::MainAlbatross,
+        NetworkId::UnitAlbatross,
     );
 
     // Validator 2 mines second block.
     assert_eq!(
-        accounts.get_complete(&address_validator_2, None),
+        accounts.get_complete(&validator_address_2, None),
         Account::default()
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
-        target: address_validator_2.clone(),
+        validator_address: validator_address_2.clone(),
+        target: validator_address_2.clone(),
         value: Coin::from_u64_unchecked(10000) + fee1 + fee2,
     };
 
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
 
     assert!(accounts
         .commit_and_test(
@@ -228,23 +228,115 @@ fn it_correctly_rewards_validators() {
         .is_ok());
 
     assert_eq!(
-        accounts.get_complete(&address_validator_1, None).balance(),
+        accounts.get_complete(&validator_address_1, None).balance(),
         Coin::from_u64_unchecked(10000) - value1 - fee1 - value2 - fee2
     );
 
     assert_eq!(
-        accounts.get_complete(&address_validator_2, None).balance(),
+        accounts.get_complete(&validator_address_2, None).balance(),
         Coin::from_u64_unchecked(10000) + fee1 + fee2
     );
 
     assert_eq!(
-        accounts.get_complete(&address_recipient_1, None).balance(),
+        accounts.get_complete(&recipient_address_1, None).balance(),
         value1
     );
 
     assert_eq!(
-        accounts.get_complete(&address_recipient_2, None).balance(),
+        accounts.get_complete(&recipient_address_2, None).balance(),
         value2
+    );
+}
+
+#[test]
+fn it_correctly_burns_rewards_from_validators() {
+    let recipient_address_1 = Address::from([3u8; Address::SIZE]);
+    let recipient_address_2 = Address::from([4u8; Address::SIZE]);
+    let sender_address = Address::from([5u8; Address::SIZE]);
+    let sender_balance = Coin::from_u64_unchecked(100);
+
+    let accounts = TestCommitRevert::with_initial_state(&[(
+        sender_address.clone(),
+        Account::Basic(BasicAccount {
+            balance: sender_balance,
+        }),
+    )]);
+
+    // Burn the first block reward.
+    let reward = Inherent::Reward {
+        validator_address: Address::burn_address(),
+        target: Address::burn_address(),
+        value: Coin::from_u64_unchecked(10000),
+    };
+
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
+
+    assert!(accounts
+        .commit_and_test(&[], &[reward], &block_state, &mut BlockLogger::empty())
+        .is_ok());
+
+    // Create transactions to Recipient 1 and Recipient 2.
+    let value1 = Coin::from_u64_unchecked(5);
+    let fee1 = Coin::from_u64_unchecked(3);
+    let value2 = Coin::from_u64_unchecked(7);
+    let fee2 = Coin::from_u64_unchecked(11);
+
+    let tx1 = Transaction::new_basic(
+        sender_address.clone(),
+        recipient_address_1.clone(),
+        value1,
+        fee1,
+        2,
+        NetworkId::UnitAlbatross,
+    );
+
+    let tx2 = Transaction::new_basic(
+        sender_address.clone(),
+        recipient_address_2.clone(),
+        value2,
+        fee2,
+        2,
+        NetworkId::UnitAlbatross,
+    );
+
+    // Burn the second block reward and the transaction fees.
+    let reward = Inherent::Reward {
+        validator_address: Address::burn_address(),
+        target: Address::burn_address(),
+        value: Coin::from_u64_unchecked(10000) + fee1 + fee2,
+    };
+
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
+
+    assert!(accounts
+        .commit_and_test(
+            &[tx1, tx2],
+            &[reward],
+            &block_state,
+            &mut BlockLogger::empty()
+        )
+        .is_ok());
+
+    assert_eq!(
+        accounts.get_complete(&recipient_address_1, None).balance(),
+        value1
+    );
+
+    assert_eq!(
+        accounts.get_complete(&recipient_address_2, None).balance(),
+        value2
+    );
+
+    assert_eq!(
+        accounts.get_complete(&sender_address, None).balance(),
+        sender_balance - value1 - fee1 - value2 - fee2
+    );
+
+    assert_eq!(
+        accounts
+            .get_complete(&Address::burn_address(), None)
+            .balance(),
+        Coin::from_u64_unchecked(20000) + fee1 + fee2
     );
 }
 
@@ -261,11 +353,11 @@ fn it_checks_for_sufficient_funds() {
         Coin::try_from(10).unwrap(),
         Coin::from_u64_unchecked(1),
         1,
-        NetworkId::MainAlbatross,
+        NetworkId::UnitAlbatross,
     );
 
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: address_sender.clone(),
         target: address_sender.clone(),
         value: Coin::from_u64_unchecked(10000),
     };
@@ -284,7 +376,7 @@ fn it_checks_for_sufficient_funds() {
 
     // Fails as sender address does not exist.
     // Note this kind of transaction would be rejected by the mempool.
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
     assert!(accounts
         .commit_and_test(
             &[tx.clone()],
@@ -329,7 +421,7 @@ fn it_checks_for_sufficient_funds() {
     // FIXME Adjust commit behaviour to fail entirely if the funds are insufficient?
     //  The mempool should reject such transactions, therefore they should not be allowed in a block.
     tx.value = Coin::from_u64_unchecked(1000000);
-    let block_state = BlockState::new(2, 2);
+    let block_state = BlockState::new(2, 2, Policy::max_supported_version());
     {
         let mut txn = accounts.env.write_transaction();
 
@@ -421,7 +513,7 @@ fn accounts_performance() {
     genesis_builder.with_network(NetworkId::UnitAlbatross);
     let address_validator = Address::from([1u8; Address::SIZE]);
     let reward = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: address_validator.clone(),
         target: address_validator,
         value: Coin::from_u64_unchecked(10000),
     };
@@ -481,7 +573,7 @@ fn accounts_performance() {
     println!("Done adding accounts to genesis {}", txns.len());
 
     let mut txn = env.write_transaction();
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
     let start = Instant::now();
     let result = accounts.commit(
         &mut (&mut txn).into(),
@@ -611,7 +703,7 @@ fn accounts_performance_history_sync_batches_single_sender() {
         let batch_start = Instant::now();
 
         for _blocks in 0..Policy::blocks_per_batch() {
-            let block_state = BlockState::new(block_index, 1);
+            let block_state = BlockState::new(block_index, 1, Policy::max_supported_version());
             let result = accounts.commit_batch(
                 &mut (&mut txn).into(),
                 &block_transactions[block_index as usize],
@@ -738,7 +830,7 @@ fn accounts_performance_history_sync_batches_many_to_many() {
         let batch_start = Instant::now();
 
         for _blocks in 0..Policy::blocks_per_batch() {
-            let block_state = BlockState::new(block_index, 1);
+            let block_state = BlockState::new(block_index, 1, Policy::max_supported_version());
             let result = accounts.commit_batch(
                 &mut (&mut txn).into(),
                 &block_transactions[block_index as usize],
@@ -811,7 +903,7 @@ fn it_commits_valid_and_failing_txns() {
     let signature_proof = SignatureProof::from_ed25519(key_pair.public, signature);
     tx.proof = signature_proof.serialize_to_vec();
 
-    let block_state = BlockState::new(1, 200);
+    let block_state = BlockState::new(1, 200, Policy::max_supported_version());
     let receipts = accounts
         .commit_and_test(&[tx], &[], &block_state, &mut BlockLogger::empty())
         .unwrap();
@@ -903,8 +995,9 @@ fn can_revert_transactions() {
     );
 
     let block_state = BlockState::new(
-        Policy::block_after_reporting_window(Policy::election_block_after(0)),
+        Policy::block_after_collateral_lockup(Policy::election_block_after(0)),
         10,
+        Policy::max_supported_version(),
     );
 
     for sender in [
@@ -986,7 +1079,9 @@ fn can_revert_transactions() {
                         fail_recipient,
                         "Testing transaction"
                     );
-                    assert_eq!(tx.verify(NetworkId::UnitAlbatross), Ok(()));
+                    for v in 0..=Policy::max_supported_version() {
+                        assert!(tx.verify(NetworkId::UnitAlbatross, v).is_ok());
+                    }
 
                     let receipts = accounts.test(&[tx], &[], &block_state);
                     if fail_sender || fail_recipient {
@@ -1009,6 +1104,9 @@ fn can_revert_transactions() {
 #[test]
 fn can_revert_inherents() {
     let accounts = TestCommitRevert::new();
+
+    let validator_address_1 = Address::from([1u8; Address::SIZE]);
+
     let mut generator = TransactionsGenerator::new(
         Accounts::new(accounts.env.clone()),
         NetworkId::UnitAlbatross,
@@ -1018,25 +1116,24 @@ fn can_revert_inherents() {
     let block_state = BlockState::new(
         Policy::blocks_per_epoch() + Policy::blocks_per_batch() + 1,
         10,
+        Policy::max_supported_version(),
     );
 
     let mut rng = test_rng(false);
 
-    info!("Testing inherent Reward");
+    info!("Testing valid inherent Reward");
     let inherent = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: validator_address_1.clone(),
         target: Address(rng.random()),
         value: Coin::from_u64_unchecked(10),
     };
 
-    // Inherents must always succeed.
     let receipts = accounts.test(&[], &[inherent], &block_state);
     assert!(matches!(receipts.inherents[..], [OperationReceipt::Ok(_)]));
 
+    info!("Testing inherent Penalize");
     let (validator_key_pair, _, _) =
         generator.create_validator_and_staker(ValidatorState::Active, false, false);
-
-    info!("Testing inherent Penalize");
     let inherent = Inherent::Penalize {
         slot: PenalizedSlot {
             slot: rng.random_range(0..Policy::SLOTS),
@@ -1045,7 +1142,6 @@ fn can_revert_inherents() {
         },
     };
 
-    // Inherents must always succeed.
     let receipts = accounts.test(&[], &[inherent], &block_state);
     assert!(matches!(receipts.inherents[..], [OperationReceipt::Ok(_)]));
 
@@ -1062,19 +1158,18 @@ fn can_revert_inherents() {
         new_epoch_slot_range: None,
     };
 
-    // Inherents must always succeed.
     let receipts = accounts.test(&[], &[inherent], &block_state);
     assert!(matches!(receipts.inherents[..], [OperationReceipt::Ok(_)]));
 
     // Testing failing inherent.
     info!("Testing inherent Reward");
     let inherent = Inherent::Reward {
-        validator_address: Address::burn_address(),
+        validator_address: validator_address_1,
         target: Policy::STAKING_CONTRACT_ADDRESS,
         value: Coin::from_u64_unchecked(10),
     };
 
-    // Inherents must always succeed.
+    // Reward inherents cannot be reverted because they are associated with macro blocks.
     let receipts = accounts.test(&[], &[inherent], &block_state);
     assert!(matches!(
         receipts.inherents[..],

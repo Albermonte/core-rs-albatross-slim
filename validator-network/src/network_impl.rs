@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, error::Error, fmt::Debug, future, sync::Arc};
 
-use async_trait::async_trait;
 use futures::{future::BoxFuture, stream::BoxStream, FutureExt, StreamExt, TryFutureExt};
 use log::warn;
 use nimiq_keys::{Address, KeyPair};
@@ -111,10 +110,7 @@ where
     /// None otherwise.
     fn get_validator(validators: Option<&Validators>, validator_id: u16) -> Option<&Validator> {
         // Acquire read on the validators and make sure they have been set. Return None otherwise.
-        validators.and_then(|validators| {
-            (usize::from(validator_id) < validators.num_validators())
-                .then(|| validators.get_validator_by_slot_band(validator_id))
-        })
+        validators.and_then(|validators| validators.get_validator_by_slot_band(validator_id))
     }
 
     /// Looks up the peer ID for a validator address in the DHT.
@@ -323,7 +319,6 @@ impl<M: RequestCommon> RequestCommon for ValidatorMessage<M> {
 // LevelUpdate - multicast
 // StateEx - request/response
 
-#[async_trait]
 impl<N> ValidatorNetwork for ValidatorNetworkImpl<N>
 where
     N: Network,

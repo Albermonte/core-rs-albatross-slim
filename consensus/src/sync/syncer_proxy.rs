@@ -17,12 +17,13 @@ use std::{
 
 use futures::{Stream, StreamExt};
 use nimiq_block::Block;
+use nimiq_blockchain_interface::AbstractBlockchain;
 use nimiq_blockchain_proxy::BlockchainProxy;
+use nimiq_genesis::NetworkInfo;
 use nimiq_light_blockchain::LightBlockchain;
 use nimiq_network_interface::network::{Network, SubscribeEvents};
 #[cfg(feature = "full")]
 use nimiq_primitives::policy::Policy;
-use nimiq_zkp_component::zkp_component::ZKPComponentProxy;
 use parking_lot::Mutex;
 use pin_project::pin_project;
 
@@ -122,13 +123,18 @@ impl<TNetwork: Network> MacroSync<TNetwork::PeerId> for EitherSyncer<TNetwork> {
             }
         }
 
+        // For the pico sync fallback, bootstrap from the hardcoded checkpoint (if the network has
+        // one) instead of re-syncing the whole election chain from genesis.
+        let checkpoint =
+            NetworkInfo::from_network_id(pico.blockchain.read().network_id()).checkpoint();
+
         log::info!("Initializing Light Macro Sync");
         let mut light_macro_sync = LightMacroSync::new(
             pico.blockchain.clone(),
             Arc::clone(&pico.network),
             network_event_rx,
-            pico.zkp_component_proxy.clone(),
             0, // Since the light sync does not keep state, we ignore the threshold.
+            checkpoint,
         );
 
         for peer_id in peers {
@@ -216,7 +222,6 @@ impl<N: Network> SyncerProxy<N> {
         blockchain_proxy: BlockchainProxy,
         network: Arc<N>,
         bls_cache: Arc<Mutex<BlsCache>>,
-        zkp_component_proxy: ZKPComponentProxy<N>,
         network_event_rx: SubscribeEvents<N::PeerId>,
         full_sync_threshold: u32,
         syncer_tracker: Arc<AtomicU32>,
@@ -268,8 +273,8 @@ impl<N: Network> SyncerProxy<N> {
             blockchain_proxy.clone(),
             Arc::clone(&network),
             network_event_rx,
-            zkp_component_proxy,
             full_sync_threshold,
+            None, // Full nodes do not bootstrap from a checkpoint.
         );
 
         // Return the Full node variant of the SyncerProxy.
@@ -286,7 +291,6 @@ impl<N: Network> SyncerProxy<N> {
         blockchain_proxy: BlockchainProxy,
         network: Arc<N>,
         bls_cache: Arc<Mutex<BlsCache>>,
-        zkp_component_proxy: ZKPComponentProxy<N>,
         network_event_rx: SubscribeEvents<N::PeerId>,
     ) -> Self {
         // Light sync does not require full block bodies, only headers and metadata.
@@ -311,13 +315,13 @@ impl<N: Network> SyncerProxy<N> {
             bls_cache,
         );
 
-        // Set up LightMacroSync, which uses ZKPs to sync the light node to the latest macro block.
+        // Set up LightMacroSync, which syncs the light node to the latest macro block.
         let macro_sync = LightMacroSync::new(
             blockchain_proxy.clone(),
             Arc::clone(&network),
             network_event_rx,
-            zkp_component_proxy,
-            0, // Since the light sync does not keep state, we ignore the threshold.
+            0,    // Since the light sync does not keep state, we ignore the threshold.
+            None, // Light nodes sync the election chain from genesis; they only verify the checkpoint.
         );
 
         // Return the constructed Light node variant of the SyncerProxy.
@@ -334,7 +338,6 @@ impl<N: Network> SyncerProxy<N> {
         blockchain_proxy: BlockchainProxy,
         network: Arc<N>,
         bls_cache: Arc<Mutex<BlsCache>>,
-        zkp_component_proxy: ZKPComponentProxy<N>,
         network_event_rx: SubscribeEvents<N::PeerId>,
     ) -> Self {
         // Configure the block queue to exclude block bodies
@@ -364,7 +367,6 @@ impl<N: Network> SyncerProxy<N> {
             blockchain_proxy.clone(),
             Arc::clone(&network),
             network_event_rx,
-            zkp_component_proxy,
         );
 
         // We start with the Pico Macro sync mechanism; can later fall back to LightMacroSync

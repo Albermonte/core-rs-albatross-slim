@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use nimiq_network_interface::{
     network::{
@@ -77,6 +76,7 @@ pub struct MockNetwork {
     peers: Arc<RwLock<ObservableHashMap<MockPeerId, PeerInfo>>>,
     hub: Arc<Mutex<MockHubInner>>,
     is_connected: Arc<AtomicBool>,
+    validation_results: Mutex<Vec<(&'static str, MockId<MockPeerId>, MsgAcceptance)>>,
 }
 
 impl MockNetwork {
@@ -105,6 +105,7 @@ impl MockNetwork {
             peers,
             hub,
             is_connected,
+            validation_results: Mutex::new(Vec::new()),
         }
     }
 
@@ -114,6 +115,13 @@ impl MockNetwork {
 
     pub fn peer_id(&self) -> MockPeerId {
         self.address.into()
+    }
+
+    /// Returns and clears all reported gossipsub validation results.
+    pub fn take_validation_results(
+        &self,
+    ) -> Vec<(&'static str, MockId<MockPeerId>, MsgAcceptance)> {
+        std::mem::take(&mut self.validation_results.lock())
     }
 
     fn dial_mock_address(&self, address: MockAddress) -> Result<(), MockNetworkError> {
@@ -347,6 +355,13 @@ impl MockNetwork {
             async move {
                 if is_connected.load(Ordering::SeqCst) {
                     match r {
+                        Ok((data, _)) if data.len() > T::MAX_MESSAGE_SIZE => {
+                            log::debug!(
+                                "Dropped item because it exceeds the maximum message size: {} > {}",
+                                data.len(),
+                                T::MAX_MESSAGE_SIZE,
+                            )
+                        }
                         Ok((data, peer_id)) => match T::Item::deserialize_from_vec(&data) {
                             Ok(item) => return Some((item, peer_id)),
                             Err(e) => {
@@ -429,7 +444,6 @@ impl MockNetwork {
     }
 }
 
-#[async_trait]
 impl Network for MockNetwork {
     type PeerId = MockPeerId;
     type AddressType = MockAddress;
@@ -507,7 +521,7 @@ impl Network for MockNetwork {
         self.unsubscribe_with_name(topic_name).await
     }
 
-    async fn publish<T: Topic>(&self, item: T::Item) -> Result<(), Self::Error>
+    async fn publish<T>(&self, item: T::Item) -> Result<(), Self::Error>
     where
         T: Topic + Sync,
     {
@@ -515,11 +529,7 @@ impl Network for MockNetwork {
         self.publish_with_name::<T>(topic_name, item).await
     }
 
-    async fn publish_subtopic<T: Topic>(
-        &self,
-        subtopic: String,
-        item: T::Item,
-    ) -> Result<(), Self::Error>
+    async fn publish_subtopic<T>(&self, subtopic: String, item: T::Item) -> Result<(), Self::Error>
     where
         T: Topic + Sync,
     {
@@ -527,11 +537,13 @@ impl Network for MockNetwork {
         self.publish_with_name::<T>(topic_name, item).await
     }
 
-    fn validate_message<TTopic>(&self, _id: Self::PubsubId, _acceptance: MsgAcceptance)
+    fn validate_message<TTopic>(&self, id: Self::PubsubId, acceptance: MsgAcceptance)
     where
         TTopic: Topic + Sync,
     {
-        // TODO implement
+        self.validation_results
+            .lock()
+            .push((TTopic::NAME, id, acceptance));
     }
 
     async fn dht_get<K, V, T>(&self, k: &K) -> Result<Option<V>, Self::Error>

@@ -11,10 +11,7 @@ use nimiq_database::{
 use nimiq_genesis::NetworkId;
 use nimiq_hash::Blake2bHash;
 use nimiq_keys::Address;
-use nimiq_mmr::{
-    error::Error as MMRError,
-    mmr::proof::{RangeProof, SizeProof},
-};
+use nimiq_mmr::{error::Error as MMRError, mmr::proof::SizeProof};
 use nimiq_primitives::policy::Policy;
 use nimiq_transaction::{
     historic_transaction::{HistoricTransaction, HistoricTransactionData, RawTransactionHash},
@@ -29,7 +26,7 @@ use super::{
 };
 use crate::{history::HistoryTreeChunk, interface::HistoryIndexInterface, HistoryStore};
 
-// `RawTransactonHash` -> `EpochBasedIndex` (`epoch number || leaf_index`)
+// `RawTransactionHash` -> `EpochBasedIndex` (`epoch number || leaf_index`)
 declare_table!(TxHashTable, "LeafIndexByTxHash", RawTransactionHash => EpochBasedIndex);
 // `Address` -> `EpochBasedIndex` -> `Blake2bHash`
 declare_table!(AddressTable, "TxHashesByAddress", Address => EpochBasedIndex => Blake2bHash);
@@ -75,8 +72,11 @@ impl HistoryStoreIndex {
 
         trace!("Check if history index needs to be rebuilt.");
         // Check if last transaction is part of index.
-        if let Some((_, hist_tx)) = hist_tx_cursor.last() {
-            let raw_tx_hash = hist_tx.value.tx_hash();
+        if let Some((epoch_number, hist_tx)) = hist_tx_cursor.last() {
+            let raw_tx_hash = self
+                .history_store
+                .load_historic_tx(&txn, epoch_number, hist_tx)
+                .tx_hash();
             if txn.get(&self.tx_hash_table, &raw_tx_hash).is_none() {
                 info!("History index out-of-date. Starting to rebuild index (this can take a long time).");
                 self.rebuild_index(&mut txn);
@@ -202,12 +202,16 @@ impl HistoryStoreIndex {
         let cursor = WriteTransaction::dup_cursor(txn, &self.history_store.hist_tx_table);
         debug!("Reading historic transactions.");
         for (epoch_number, hist_tx) in cursor.into_iter_start() {
+            let leaf_index = hist_tx.index;
+            let hist_tx = self
+                .history_store
+                .load_historic_tx(txn, epoch_number, hist_tx);
             self.put_historic_tx(
                 &mut hashes,
                 &mut addresses,
                 epoch_number,
-                hist_tx.index,
-                &hist_tx.value,
+                leaf_index,
+                &hist_tx,
             );
         }
 
@@ -453,16 +457,6 @@ impl HistoryInterface for HistoryStoreIndex {
         )
     }
 
-    fn tree_from_chunks(
-        &self,
-        epoch_number: u32,
-        chunks: Vec<(Vec<HistoricTransaction>, RangeProof<Blake2bHash>)>,
-        txn: &mut MdbxWriteTransaction,
-    ) -> Result<Blake2bHash, MMRError> {
-        self.history_store
-            .tree_from_chunks(epoch_number, chunks, txn)
-    }
-
     fn get_last_leaf_block_number(&self, txn_option: Option<&MdbxReadTransaction>) -> Option<u32> {
         self.history_store.get_last_leaf_block_number(txn_option)
     }
@@ -704,6 +698,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oversized_transactions_are_indexed() {
+        let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
+        let block_number = Policy::genesis_block_number() + 1;
+        let epoch_number = Policy::epoch_at(block_number);
+
+        // Exceeds the dup table limit for any page size
+        let mut oversized = create_transaction(block_number, 1);
+        if let HistoricTransactionData::Basic(ExecutedTransaction::Ok(tx)) = &mut oversized.data {
+            tx.proof = vec![0; 40_000];
+        }
+        let hist_txs = vec![create_transaction(block_number, 0), oversized.clone()];
+
+        // Store the transactions without an index, with the oversized one last
+        {
+            let history_store = HistoryStore::new(env.clone(), NetworkId::UnitAlbatross);
+            let mut txn = env.write_transaction();
+            history_store
+                .add_to_history(&mut txn, block_number, &hist_txs)
+                .unwrap();
+            txn.commit();
+        }
+
+        // Opening the index rebuilds it, which reads the oversized transaction
+        let history_store = HistoryStoreIndex::new(env.clone(), NetworkId::UnitAlbatross);
+        let mut txn = env.write_transaction();
+        assert_eq!(
+            history_store.get_hist_tx_by_hash(&oversized.tx_hash(), Some(&txn)),
+            Some(oversized.clone())
+        );
+        let sender = &oversized.unwrap_basic().get_raw_transaction().sender;
+        assert_eq!(
+            history_store
+                .get_tx_hashes_by_address(sender, 10, None, Some(&txn))
+                .len(),
+            2
+        );
+
+        // Removing the history also removes the oversized transaction from the index
+        history_store
+            .remove_history(&mut txn, epoch_number)
+            .unwrap();
+        assert_eq!(
+            history_store.get_hist_tx_by_hash(&oversized.tx_hash(), Some(&txn)),
+            None
+        );
+        assert!(history_store
+            .get_tx_hashes_by_address(sender, 10, None, Some(&txn))
+            .is_empty());
+    }
+
+    #[test]
     fn prove_num_leaves_works() {
         // Initialize History Store.
         let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
@@ -817,53 +862,42 @@ mod tests {
     }
 
     #[test]
-    fn transaction_in_validity_window_works() {
+    fn transaction_in_validity_window_matches_protocol_validity() {
         // Initialize History Store.
         let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
         let history_store = HistoryStoreIndex::new(env.clone(), NetworkId::UnitAlbatross);
 
-        // Create historic transactions.
-        let ext_0 = create_transaction(Policy::genesis_block_number() + 1, 0);
-        let ext_1 = create_transaction(Policy::genesis_block_number() + 1, 1);
+        let first_inclusion_block = Policy::genesis_block_number() + 1;
+        let validity_start_height = first_inclusion_block + Policy::blocks_per_batch();
+        let last_valid_block =
+            validity_start_height + Policy::transaction_validity_window_blocks() - 1;
 
-        let hist_txs = vec![ext_0.clone(), ext_1.clone()];
+        let replay_tx =
+            create_transaction_with_validity_start(first_inclusion_block, 0, validity_start_height);
+        let raw_tx = match &replay_tx.data {
+            HistoricTransactionData::Basic(tx) => tx.get_raw_transaction(),
+            _ => unreachable!("test helper must create a basic transaction"),
+        };
 
-        // Add historic transactions to History Store.
+        assert!(raw_tx.is_valid_at(first_inclusion_block));
+        assert!(raw_tx.is_valid_at(last_valid_block));
+        assert!(!raw_tx.is_valid_at(last_valid_block + 1));
+
         let mut txn = env.write_transaction();
-        history_store.add_to_history(&mut txn, Policy::genesis_block_number() + 1, &hist_txs);
+        history_store.add_to_history(&mut txn, first_inclusion_block, &[replay_tx.clone()]);
 
-        // Those transactions should be part of the valitidy window
-        assert!(history_store.tx_in_validity_window(&ext_0.tx_hash(), Some(&txn)));
+        assert!(history_store.tx_in_validity_window(&replay_tx.tx_hash(), Some(&txn)));
 
-        assert!(history_store.tx_in_validity_window(&ext_1.tx_hash(), Some(&txn)));
-
-        // Now keep pushing transactions to the history store until we are past the transaction validity window
-        let validity_window_blocks = Policy::transaction_validity_window_blocks();
-
-        let mut txn_hashes = vec![];
-
-        for bn in 2..validity_window_blocks + 10 {
-            let historic_txn = create_transaction(Policy::genesis_block_number() + bn, bn as u64);
-            txn_hashes.push(historic_txn.tx_hash());
-            history_store.add_to_history(
-                &mut txn,
-                Policy::genesis_block_number() + bn,
-                &[historic_txn],
-            );
+        let validity_store = history_store.history_store.validity_store.as_ref().unwrap();
+        for block_number in first_inclusion_block + 1..=last_valid_block {
+            validity_store.update_validity_store(&mut txn, block_number);
         }
 
-        // Since we are past the txn in validity window, the first two transaction should no longer be in it
-        assert!(!history_store.tx_in_validity_window(&ext_0.tx_hash(), Some(&txn)));
+        assert!(history_store.tx_in_validity_window(&replay_tx.tx_hash(), Some(&txn)));
 
-        assert!(!history_store.tx_in_validity_window(&ext_1.tx_hash(), Some(&txn)));
+        validity_store.update_validity_store(&mut txn, last_valid_block + 1);
 
-        for txn_hash in &txn_hashes[..8] {
-            assert!(!history_store.tx_in_validity_window(txn_hash, Some(&txn)));
-        }
-
-        for txn_hash in &txn_hashes[8..] {
-            assert!(history_store.tx_in_validity_window(txn_hash, Some(&txn)));
-        }
+        assert!(!history_store.tx_in_validity_window(&replay_tx.tx_hash(), Some(&txn)));
     }
 
     #[test]
@@ -1467,7 +1501,7 @@ mod tests {
             block_number: block,
             block_time: 0,
             data: HistoricTransactionData::Reward(RewardEvent {
-                validator_address: Address::burn_address(),
+                validator_address: reward_address.clone(),
                 reward_address,
                 value: Coin::from_u64_unchecked(value),
             }),
@@ -1525,6 +1559,14 @@ mod tests {
     }
 
     fn create_transaction(block: u32, value: u64) -> HistoricTransaction {
+        create_transaction_with_validity_start(block, value, 0)
+    }
+
+    fn create_transaction_with_validity_start(
+        block: u32,
+        value: u64,
+        validity_start_height: u32,
+    ) -> HistoricTransaction {
         HistoricTransaction {
             network_id: NetworkId::UnitAlbatross,
             block_number: block,
@@ -1538,7 +1580,7 @@ mod tests {
                     Address::burn_address(),
                     Coin::from_u64_unchecked(value),
                     Coin::from_u64_unchecked(0),
-                    0,
+                    validity_start_height,
                     NetworkId::UnitAlbatross,
                 ),
             )),

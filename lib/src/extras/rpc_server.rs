@@ -38,13 +38,10 @@ pub fn initialize_rpc_server(client: &Client, config: RpcServerConfig) -> Result
 
     let allowed_methods: HashSet<String> = ALLOWED_METHODS.iter().map(|s| (*s).to_string()).collect();
 
-    let cors_domains = config.cors_domains.unwrap_or_default();
-    let is_cors_wildcard = cors_domains.iter().any(|origin| origin.trim() == "*");
-    let cors_config = if is_cors_wildcard {
-        Cors::new().with_any_origin()
-    } else {
-        Cors::new().with_origins(cors_domains)
-    };
+    // A `*` entry allows any origin
+    let cors_config = Cors::new()
+        .with_origins(config.cors_domains.unwrap_or_default())
+        .map_err(|e| Error::config_error(format!("rpc-server.cors_domains: {e}")))?;
 
     let mut dispatcher = ModularDispatcher::default();
 
@@ -54,8 +51,10 @@ pub fn initialize_rpc_server(client: &Client, config: RpcServerConfig) -> Result
     Ok(Server::new(
         Config {
             bind_to: (config.bind_to.unwrap_or_else(default_bind), config.port).into(),
+            // The RPC client connects over `/ws` and the subscription methods are only available
+            // there, so websocket support must stay enabled
             enable_websocket: true,
-            ip_whitelist: None,
+            ip_whitelist: config.allow_ips.map(|ips| ips.into_iter().collect()),
             basic_auth,
             cors: Some(cors_config),
         },

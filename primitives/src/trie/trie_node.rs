@@ -48,9 +48,12 @@ impl TrieNodeChild {
         parent_key: &KeyNibbles,
         missing_range: &Option<RangeFrom<KeyNibbles>>,
     ) -> bool {
+        let Some(combined) = parent_key.checked_add(&self.suffix) else {
+            return false;
+        };
         missing_range
             .as_ref()
-            .map(|range| range.contains(&(parent_key + &self.suffix)))
+            .map(|range| range.contains(&combined))
             .unwrap_or(false)
     }
 
@@ -63,10 +66,13 @@ impl TrieNodeChild {
         parent_key: &KeyNibbles,
         missing_range: &Option<RangeFrom<KeyNibbles>>,
     ) -> Result<KeyNibbles, MerkleRadixTrieError> {
+        let combined = parent_key
+            .checked_add(&self.suffix)
+            .ok_or(MerkleRadixTrieError::WrongPrefix)?;
         if self.is_stump(parent_key, missing_range) {
             return Err(MerkleRadixTrieError::ChildIsStump);
         }
-        Ok(parent_key + &self.suffix)
+        Ok(combined)
     }
 }
 
@@ -164,18 +170,17 @@ impl TrieNode {
     /// key "31f6d" and the given child key is "31f6d925ca" (both are in hexadecimal) then the child
     /// index is 9.
     pub fn child_index(&self, child_prefix: &KeyNibbles) -> Result<usize, MerkleRadixTrieError> {
-        if !self.key.is_prefix_of(child_prefix) {
+        if !self.key.is_prefix_of(child_prefix) || self.key.len() == child_prefix.len() {
             error!(
-                "Child's prefix {} is not a prefix of the node with key {}!",
+                "Child's prefix {} is not a strict prefix of the node with key {}!",
                 child_prefix, self.key,
             );
             return Err(MerkleRadixTrieError::WrongPrefix);
         }
 
-        // Key length has to be smaller or equal to the child prefix length, so this will only panic
-        // when `child_prefix` has the same length as `self.key()`.
-        // PITODO: return error instead of unwrapping
-        Ok(child_prefix.get(self.key.len()).unwrap())
+        child_prefix
+            .get(self.key.len())
+            .ok_or(MerkleRadixTrieError::WrongPrefix)
     }
 
     /// Returns the current node's child with the given prefix.
@@ -511,6 +516,41 @@ mod tests {
             branch_node.child_index(&child_key_5),
             Err(MerkleRadixTrieError::WrongPrefix)
         );
+
+        // A key of the same length as the node's key has no child index
+        assert_eq!(
+            branch_node.child_index(&branch_node.key),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
+        assert_eq!(
+            leaf_node.child_index(&leaf_node.key),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
+    }
+
+    #[test]
+    fn child_accessors_reject_own_key() {
+        let key: KeyNibbles = "cfb986".parse().unwrap();
+        let mut node = TrieNode::new_empty(key.clone());
+        node.put_child(&"cfb986f5a".parse().unwrap(), "child_1".hash())
+            .unwrap();
+
+        assert_eq!(
+            node.child(&key).map(|c| &c.hash),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
+        assert_eq!(
+            node.child_key(&key, &None),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
+        assert_eq!(
+            node.put_child(&key, "child_2".hash()),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
+        assert_eq!(
+            node.remove_child(&key),
+            Err(MerkleRadixTrieError::WrongPrefix)
+        );
     }
 
     #[test]
@@ -722,5 +762,33 @@ mod tests {
 
         let root_node = TrieNode::new_root();
         assert_eq!(root_node.value, None);
+    }
+
+    #[test]
+    fn key_rejects_oversized_suffix() {
+        // Both operands deserialize as valid `KeyNibbles` individually (length <= 126),
+        // but their concatenation would overflow the 63-byte buffer in `KeyNibbles::Add`.
+        // `TrieNodeChild::key` must return an error instead of panicking.
+        let cases = [
+            ("a".repeat(40), "b".repeat(90)), // even+even
+            ("a".repeat(41), "b".repeat(87)), // odd+odd
+        ];
+
+        for (parent_str, suffix_str) in &cases {
+            let parent: KeyNibbles = parent_str.parse().unwrap();
+            let suffix: KeyNibbles = suffix_str.parse().unwrap();
+            let child = TrieNodeChild {
+                suffix,
+                hash: Blake2bHash::default(),
+            };
+
+            assert_eq!(
+                child.key(&parent, &None),
+                Err(MerkleRadixTrieError::WrongPrefix),
+            );
+            // `is_stump` is panic-safe too: oversized combined keys cannot lie inside
+            // any `missing_range`, so it must return `false` without invoking `Add`.
+            assert!(!child.is_stump(&parent, &None));
+        }
     }
 }

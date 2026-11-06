@@ -328,15 +328,30 @@ impl Transaction {
         TransactionFormat::Extended
     }
 
-    pub fn verify_mut(&mut self, network_id: NetworkId) -> Result<(), TransactionError> {
-        let ret = self.verify(network_id);
+    pub fn reset_verification_state(&mut self) {
+        self.valid = false;
+    }
+
+    pub fn verify_mut(
+        &mut self,
+        network_id: NetworkId,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
+        let ret = self.verify(network_id, protocol_version);
         if ret.is_ok() {
             self.valid = true;
         }
         ret
     }
 
-    pub fn verify(&self, network_id: NetworkId) -> Result<(), TransactionError> {
+    pub fn verify(
+        &self,
+        network_id: NetworkId,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
+        // `valid` only records that this transaction has passed verification before. This fast
+        // path is sound only while verification rules remain protocol-version invariant, or when
+        // callers clear the cached state across protocol upgrades.
         if self.valid {
             return Ok(());
         }
@@ -369,10 +384,10 @@ impl Transaction {
         }
 
         // Check transaction validity for sender account.
-        AccountType::verify_outgoing_transaction(self)?;
+        AccountType::verify_outgoing_transaction(self, protocol_version)?;
 
         // Check transaction validity for recipient account.
-        AccountType::verify_incoming_transaction(self)?;
+        AccountType::verify_incoming_transaction(self, protocol_version)?;
 
         Ok(())
     }
@@ -383,7 +398,7 @@ impl Transaction {
             >= self
                 .validity_start_height
                 .saturating_sub(Policy::blocks_per_batch())
-            && block_height < self.validity_start_height + window
+            && block_height < self.validity_start_height.saturating_add(window)
     }
 
     pub fn contract_creation_address(&self) -> Address {
@@ -565,6 +580,16 @@ impl Transaction {
                             // The signer of the internal proof is the staker address
                             addresses.insert(proof.compute_signer());
                         }
+                        IncomingStakingTransactionData::SetSignalData {
+                            validator_address,
+                            proof,
+                            ..
+                        } => {
+                            // Add the validator address
+                            addresses.insert(validator_address);
+                            // The signer of the internal proof is the validator's signing key
+                            addresses.insert(proof.compute_signer());
+                        }
                     }
                 }
             }
@@ -727,11 +752,8 @@ mod serde_derive {
                             sv.serialize_field(BASIC_FIELDS[7], signature)?;
                         }
                     }
-                    if signature_proof.webauthn_fields.is_some() {
-                        sv.serialize_field(
-                            BASIC_FIELDS[8],
-                            signature_proof.webauthn_fields.as_ref().unwrap(),
-                        )?;
+                    if let Some(webauthn_fields) = &signature_proof.webauthn_fields {
+                        sv.serialize_field(BASIC_FIELDS[8], webauthn_fields)?;
                     }
                     sv.end()
                 }

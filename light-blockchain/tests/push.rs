@@ -1,23 +1,48 @@
-use std::{path::Path, sync::Arc};
+use std::{ops::Add, sync::Arc};
 
 use nimiq_block::{Block, BlockError, SkipBlockProof};
 use nimiq_blockchain::{BlockProducer, Blockchain};
 use nimiq_blockchain_interface::{
-    AbstractBlockchain, PushError, PushError::InvalidBlock, PushResult,
+    AbstractBlockchain, BlockchainEvent, PushError, PushError::InvalidBlock, PushResult,
 };
 use nimiq_genesis::NetworkId;
 use nimiq_hash::Blake2bHash;
 use nimiq_light_blockchain::LightBlockchain;
-use nimiq_primitives::policy::Policy;
+use nimiq_primitives::{policy::Policy, slots_allocation::Validators};
 use nimiq_test_log::test;
 use nimiq_test_utils::{
     block_production::TemporaryBlockProducer,
-    test_custom_block::{next_macro_block, next_micro_block, next_skip_block, BlockConfig},
-    zkp_test_data::{get_base_seed, simulate_merger_wrapper, ZKP_TEST_KEYS_PATH},
+    blockchain::{
+        fill_micro_blocks_with_txns, next_protocol_upgrade_block, produce_macro_blocks_with_txns,
+    },
+    blockchain_events_broadcast::{assert_events_eq_unordered, try_collect_events},
+    test_custom_block::{
+        finalize_macro_block_proposal, invalid_voting_key, next_macro_block,
+        next_macro_block_proposal, next_micro_block, next_skip_block, replace_voting_keys,
+        BlockConfig,
+    },
 };
 use nimiq_vrf::VrfSeed;
-use nimiq_zkp::ZKP_VERIFYING_DATA;
 use parking_lot::RwLock;
+
+fn push_source_chain_to_light(
+    source: &TemporaryBlockProducer,
+    light_blockchain: &Arc<RwLock<LightBlockchain>>,
+) {
+    let source = source.blockchain.read();
+
+    for block_number in (Policy::genesis_block_number() + 1)..=source.block_number() {
+        let block = source
+            .chain_store
+            .get_block_at(block_number, true, None)
+            .unwrap();
+
+        assert_eq!(
+            LightBlockchain::push(light_blockchain.upgradable_read(), remove_micro_body(block)),
+            Ok(PushResult::Extended),
+        );
+    }
+}
 
 fn remove_micro_body(block: Block) -> Block {
     match block {
@@ -279,6 +304,90 @@ fn simply_push_macro_block(config: &BlockConfig, expected_res: &Result<PushResul
     };
 
     assert_eq!(&temp_producer.push(block), expected_res);
+}
+
+#[test]
+fn it_emits_protocol_upgrade_event_for_election_push() {
+    let source = TemporaryBlockProducer::new();
+    produce_macro_blocks_with_txns(
+        &source.producer,
+        &source.blockchain,
+        (Policy::batches_per_epoch() - 1) as usize,
+        1,
+        0,
+    );
+    fill_micro_blocks_with_txns(&source.producer, &source.blockchain, 1, 0);
+
+    let light_blockchain = Arc::new(RwLock::new(LightBlockchain::new(NetworkId::UnitAlbatross)));
+    let initial_version = light_blockchain.read().current_version();
+    push_source_chain_to_light(&source, &light_blockchain);
+
+    let mut receiver = light_blockchain.read().notifier.subscribe();
+    let (upgrade_block, upgrade_version) =
+        next_protocol_upgrade_block(&source.producer, &source.blockchain);
+    assert_eq!(
+        initial_version.add(1),
+        upgrade_version,
+        "Initial blockchain should be one version bellow the targeted upgrade version"
+    );
+    let upgrade_hash = upgrade_block.hash();
+
+    assert_eq!(
+        LightBlockchain::push(light_blockchain.upgradable_read(), upgrade_block,),
+        Ok(PushResult::Extended),
+    );
+    assert_events_eq_unordered(
+        try_collect_events(&mut receiver).unwrap(),
+        vec![
+            BlockchainEvent::Extended(upgrade_hash.clone()),
+            BlockchainEvent::EpochFinalized(upgrade_hash.clone()),
+            BlockchainEvent::ProtocolUpgrade(upgrade_hash, upgrade_version),
+        ],
+    );
+    assert_eq!(light_blockchain.read().current_version(), upgrade_version);
+}
+
+#[test]
+fn it_does_not_emit_protocol_upgrade_event_without_version_change() {
+    let source = TemporaryBlockProducer::new();
+    produce_macro_blocks_with_txns(
+        &source.producer,
+        &source.blockchain,
+        (Policy::batches_per_epoch() - 1) as usize,
+        1,
+        0,
+    );
+    fill_micro_blocks_with_txns(&source.producer, &source.blockchain, 1, 0);
+
+    let light_blockchain = Arc::new(RwLock::new(LightBlockchain::new(NetworkId::UnitAlbatross)));
+    let initial_version = light_blockchain.read().current_version();
+    push_source_chain_to_light(&source, &light_blockchain);
+
+    let mut receiver = light_blockchain.read().notifier.subscribe();
+    let election_block = {
+        let blockchain = source.blockchain.read();
+        next_macro_block(
+            &source.producer.signing_key,
+            &source.producer.voting_key,
+            &blockchain,
+            &BlockConfig::default(),
+        )
+    };
+    let election_hash = election_block.hash();
+
+    assert_eq!(
+        LightBlockchain::push(light_blockchain.upgradable_read(), election_block,),
+        Ok(PushResult::Extended),
+    );
+    assert_events_eq_unordered(
+        try_collect_events(&mut receiver).unwrap(),
+        vec![
+            BlockchainEvent::Extended(election_hash.clone()),
+            BlockchainEvent::EpochFinalized(election_hash),
+        ],
+    );
+
+    assert_eq!(light_blockchain.read().current_version(), initial_version);
 }
 
 #[test]
@@ -674,52 +783,174 @@ fn it_can_rebranch_to_inferior_macro_block() {
 }
 
 #[test]
-fn can_push_zkps() {
-    let temp_producer1 = TemporaryBlockProducer::new();
-    let temp_producer2 = TemporaryLightBlockProducer::new();
+fn rebranch_to_macro_updates_macro_head() {
+    let producer1 = TemporaryLightBlockProducer::new();
+    let producer2 = TemporaryLightBlockProducer::new();
 
-    // Produce a full epoch of blocks.
-    for _ in 0..Policy::blocks_per_epoch() - 1 {
-        temp_producer1.next_block(vec![], false);
+    let inferior = producer1.next_block(vec![], false);
+    producer2.next_block(vec![], true);
+    assert_eq!(producer2.push(inferior), Ok(PushResult::Ignored));
+
+    for _ in 1..Policy::blocks_per_batch() - 1 {
+        let inferior = producer1.next_block(vec![], false);
+        producer2.next_block(vec![], false);
+        assert_eq!(producer2.push(inferior), Ok(PushResult::Ignored));
     }
-    let election_block = temp_producer1.next_block(vec![], false);
-    let block_number = election_block.block_number();
 
-    // Try pushing an invalid ZKP.
-    let invalid_zkp_proof = Default::default();
-    let blockchain2 = temp_producer2.light_blockchain.upgradable_read();
-    let result = LightBlockchain::push_zkp(
-        blockchain2,
-        election_block.clone(),
-        invalid_zkp_proof,
-        false,
+    let macro_block = producer1.next_block(vec![], false);
+    assert!(macro_block.is_macro());
+
+    assert_eq!(
+        producer2.push(macro_block.clone()),
+        Ok(PushResult::Rebranched)
     );
 
-    assert_eq!(result, Err(PushError::InvalidZKP));
+    let light_blockchain = producer2.light_blockchain.read();
+    assert_eq!(light_blockchain.head.hash(), macro_block.hash());
+    assert_eq!(light_blockchain.macro_head.hash(), macro_block.hash());
+}
+
+#[test]
+fn rebranch_to_election_macro_updates_light_state() {
+    let producer1 = TemporaryLightBlockProducer::new();
+    let producer2 = TemporaryLightBlockProducer::new();
+
+    for _ in 0..Policy::blocks_per_epoch() - Policy::blocks_per_batch() {
+        let block = producer1.next_block(vec![], false);
+        assert_eq!(producer2.push(block), Ok(PushResult::Extended));
+    }
+
+    let inferior = producer1.next_block(vec![], false);
+    producer2.next_block(vec![], true);
+    assert_eq!(producer2.push(inferior), Ok(PushResult::Ignored));
+
+    for _ in 1..Policy::blocks_per_batch() - 1 {
+        let inferior = producer1.next_block(vec![], false);
+        producer2.next_block(vec![], false);
+        assert_eq!(producer2.push(inferior), Ok(PushResult::Ignored));
+    }
+
+    let election_block = producer1.next_block(vec![], false);
+    assert!(election_block.is_election());
+
+    assert_eq!(
+        producer2.push(election_block.clone()),
+        Ok(PushResult::Rebranched)
+    );
+
     {
-        let blockchain2_rg = temp_producer2.light_blockchain.read();
+        let light_blockchain = producer2.light_blockchain.read();
+        let election_hash = election_block.hash();
+        let election_epoch = Policy::epoch_at(election_block.block_number());
+
+        assert_eq!(light_blockchain.head.hash(), election_hash);
+        assert_eq!(light_blockchain.macro_head.hash(), election_hash);
+        assert_eq!(light_blockchain.election_head.hash(), election_hash);
         assert_eq!(
-            blockchain2_rg.block_number(),
-            Policy::genesis_block_number()
+            light_blockchain.current_validators,
+            election_block.validators()
+        );
+        assert_eq!(
+            light_blockchain.chain_store.get_election(election_epoch),
+            Some(&election_block.unwrap_macro_ref().header)
         );
     }
 
-    // Create a valid ZKP.
-    let zkp_proof = simulate_merger_wrapper(
-        Path::new(ZKP_TEST_KEYS_PATH),
-        &temp_producer1.blockchain,
-        &ZKP_VERIFYING_DATA,
-        &mut get_base_seed(),
+    let next_block = producer1.next_block(vec![], false);
+    let full_result = producer2.temp_producer.push(next_block.clone());
+    let light_result = LightBlockchain::push(
+        producer2.light_blockchain.upgradable_read(),
+        remove_micro_body(next_block),
     );
 
-    // Push the valid ZKP.
-    let blockchain2 = temp_producer2.light_blockchain.upgradable_read();
-    let result =
-        LightBlockchain::push_zkp(blockchain2, election_block, zkp_proof.proof.unwrap(), false);
+    assert_eq!(full_result, Ok(PushResult::Extended));
+    assert_eq!(light_result, full_result);
+}
 
-    assert_eq!(result, Ok(PushResult::Extended));
-    {
-        let blockchain2_rg = temp_producer2.light_blockchain.read();
-        assert_eq!(blockchain2_rg.block_number(), block_number);
+/// Voting keys are not decompressed by intrinsic header verification, but only once the election
+/// block's justification is verified. They must still all be decompressed by the time the block
+/// is adopted: the web client's BLS key cache relies on it.
+#[test]
+fn it_decompresses_the_voting_keys_of_pushed_election_blocks() {
+    let source = TemporaryBlockProducer::new();
+    produce_macro_blocks_with_txns(
+        &source.producer,
+        &source.blockchain,
+        (Policy::batches_per_epoch() - 1) as usize,
+        1,
+        0,
+    );
+    fill_micro_blocks_with_txns(&source.producer, &source.blockchain, 1, 0);
+
+    let light_blockchain = Arc::new(RwLock::new(LightBlockchain::new(NetworkId::UnitAlbatross)));
+    push_source_chain_to_light(&source, &light_blockchain);
+
+    // Elect fresh voting keys that nothing has decompressed yet. The light chain doesn't check the
+    // elected validators against the staking contract, so the block is still valid for it.
+    let config = BlockConfig::default();
+    let mut proposal = next_macro_block_proposal(
+        &source.producer.signing_key,
+        &source.blockchain.read(),
+        &config,
+    );
+    let voting_keys = replace_voting_keys(proposal.header.validators.as_mut().unwrap());
+    let block_hash = proposal.hash_blake2s();
+    let election_block =
+        finalize_macro_block_proposal(&source.producer.voting_key, proposal, block_hash, &config);
+    assert!(voting_keys.iter().all(|key| !key.has_uncompressed()));
+
+    assert_eq!(
+        LightBlockchain::push(light_blockchain.upgradable_read(), election_block),
+        Ok(PushResult::Extended),
+    );
+    assert!(voting_keys.iter().all(|key| key.has_uncompressed()));
+}
+
+/// Builds the election block of the first epoch, letting `modify` change the elected validators
+/// before it is signed.
+fn election_block_with(modify: impl FnOnce(&mut Validators)) -> Block {
+    let source = TemporaryBlockProducer::new();
+    for _ in 0..Policy::blocks_per_epoch() - 1 {
+        source.next_block(vec![], false);
     }
+
+    let config = BlockConfig::default();
+    let mut proposal = next_macro_block_proposal(
+        &source.producer.signing_key,
+        &source.blockchain.read(),
+        &config,
+    );
+    modify(proposal.header.validators.as_mut().unwrap());
+    let block_hash = proposal.hash_blake2s();
+    finalize_macro_block_proposal(&source.producer.voting_key, proposal, block_hash, &config)
+}
+
+/// The pico sync adopts election blocks without verifying a justification, so it must check the
+/// voting keys itself. The web client's BLS key cache relies on them being decompressed.
+#[test]
+fn it_decompresses_the_voting_keys_of_pico_election_blocks() {
+    let mut voting_keys = vec![];
+    let election_block =
+        election_block_with(|validators| voting_keys = replace_voting_keys(validators));
+    let light_blockchain = RwLock::new(LightBlockchain::new(NetworkId::UnitAlbatross));
+    assert!(voting_keys.iter().all(|key| !key.has_uncompressed()));
+
+    assert_eq!(
+        LightBlockchain::push_pico_election(light_blockchain.upgradable_read(), election_block),
+        Ok(PushResult::Extended),
+    );
+    assert!(voting_keys.iter().all(|key| key.has_uncompressed()));
+}
+
+#[test]
+fn it_rejects_pico_election_blocks_with_an_invalid_voting_key() {
+    let election_block = election_block_with(|validators| {
+        validators.validators[0].voting_key = invalid_voting_key();
+    });
+    let light_blockchain = RwLock::new(LightBlockchain::new(NetworkId::UnitAlbatross));
+
+    assert_eq!(
+        LightBlockchain::push_pico_election(light_blockchain.upgradable_read(), election_block),
+        Err(InvalidBlock(BlockError::InvalidValidators)),
+    );
 }

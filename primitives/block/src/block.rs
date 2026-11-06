@@ -257,9 +257,11 @@ impl Block {
 
     /// Returns the sum of the fees of all of the transactions in the block. If the block is a Macro
     /// block it just returns zero, since Macro blocks don't contain any transactions.
-    pub fn sum_transaction_fees(&self) -> Coin {
+    ///
+    /// Returns an error if the sum of fees would overflow `Coin::MAX`.
+    pub fn sum_transaction_fees(&self) -> Result<Coin, BlockError> {
         match self {
-            Block::Macro(_) => Coin::ZERO,
+            Block::Macro(_) => Ok(Coin::ZERO),
             Block::Micro(block) => block
                 .body
                 .as_ref()
@@ -267,9 +269,12 @@ impl Block {
                     ex.transactions
                         .iter()
                         .map(|tx| tx.get_raw_transaction().fee)
-                        .sum()
+                        .try_fold(Coin::ZERO, |acc, fee| {
+                            acc.checked_add(fee)
+                                .ok_or(BlockError::TransactionFeeOverflow)
+                        })
                 })
-                .unwrap_or(Coin::ZERO),
+                .unwrap_or(Ok(Coin::ZERO)),
         }
     }
 
@@ -361,14 +366,14 @@ impl Block {
     /// Verifies the block.
     /// Note that only intrinsic verifications are performed and further checks
     /// are needed when completely verifying a block.
-    pub fn verify(&self, network: NetworkId) -> Result<(), BlockError> {
+    pub fn verify(&self, network: NetworkId, max_timestamp: u64) -> Result<(), BlockError> {
         // Check the block type.
         if self.ty() != BlockType::of(self.block_number()) {
             return Err(BlockError::InvalidBlockType);
         }
 
         // Perform header intrinsic verification.
-        self.verify_header(network, self.is_skip())?;
+        self.verify_header(network, self.is_skip(), max_timestamp)?;
 
         // Verify body if it exists.
         if self.has_body() {
@@ -391,7 +396,7 @@ impl Block {
             // Perform block type specific body verification.
             if let Block::Micro(block) = self {
                 let body = block.body.as_ref().unwrap();
-                body.verify(self.is_skip(), self.block_number())?;
+                body.verify(self.is_skip(), self.block_number(), block.header.version)?;
             }
         }
 
@@ -400,11 +405,29 @@ impl Block {
 
     /// Verifies the header.
     /// Note that only header intrinsic verifications are performed and further checks
-    /// are needed when completely verifying a block header.
-    pub fn verify_header(&self, network: NetworkId, is_skip: bool) -> Result<(), BlockError> {
+    /// are needed when completely verifying a block header. Voting keys are not checked here, see
+    /// `verify_voting_keys`.
+    pub fn verify_header(
+        &self,
+        network: NetworkId,
+        is_skip: bool,
+        max_timestamp: u64,
+    ) -> Result<(), BlockError> {
         // Check whether the block is from the correct network.
         if self.network() != network {
             return Err(BlockError::NetworkMismatch);
+        }
+
+        // Check that the block timestamp does not exceed the permitted future drift.
+        if self.timestamp() > max_timestamp {
+            warn!(
+                header = %self,
+                timestamp = self.timestamp(),
+                max_timestamp,
+                reason = "timestamp too far in the future",
+                "Invalid block header"
+            );
+            return Err(BlockError::InvalidTimestamp);
         }
 
         // Check that the version is supported.
@@ -632,10 +655,20 @@ impl Block {
     }
 
     /// Verifies that the block is valid for the given validators.
+    /// For election blocks, this includes `verify_voting_keys` once the justification verifies.
     pub fn verify_validators(&self, validators: &Validators) -> Result<(), BlockError> {
         match self {
             Block::Micro(block) => block.verify_validators(validators),
             Block::Macro(block) => block.verify_validators(validators),
+        }
+    }
+
+    /// Verifies that the voting keys of the validators elected by this block can be decompressed.
+    /// This is expensive, so it must only be called once the block is authenticated.
+    pub fn verify_voting_keys(&self) -> Result<(), BlockError> {
+        match self {
+            Block::Micro(_) => Ok(()),
+            Block::Macro(block) => block.header.verify_voting_keys(),
         }
     }
 }
@@ -650,7 +683,7 @@ impl fmt::Display for Block {
 }
 
 /// Struct representing the body of a block.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, SerializedMaxSize)]
 pub enum BlockBody {
     Micro(MicroBody),
     Macro(MacroBody),

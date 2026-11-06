@@ -18,7 +18,7 @@ use nimiq_network_interface::{
     network::{Network, NetworkEvent},
     request::RequestError,
 };
-use nimiq_primitives::{policy::Policy, slots_allocation::Validators};
+use nimiq_primitives::{networks::NetworkId, policy::Policy, slots_allocation::Validators};
 use nimiq_utils::spawn;
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -110,7 +110,8 @@ pub struct SyncQueueError {
 /// The public interface allows to request blocks, which are not immediately returned.
 /// The blocks instead are returned by polling the component.
 pub struct BlockRequestComponent<N: Network> {
-    sync_queue: SyncQueue<N, MissingBlockRequest, MissingBlockResponse<N>, MissingBlockError, ()>, // requesting missing blocks from peers
+    sync_queue:
+        SyncQueue<N, MissingBlockRequest, MissingBlockResponse<N>, MissingBlockError, NetworkId>, // requesting missing blocks from peers
     peers: Arc<RwLock<PeerList<N>>>,
     include_body: bool,
     /// Pending requests.
@@ -120,7 +121,7 @@ pub struct BlockRequestComponent<N: Network> {
 impl<N: Network> BlockRequestComponent<N> {
     const NUM_PENDING_BLOCKS: usize = 5;
 
-    pub fn new(network: Arc<N>, include_body: bool) -> Self {
+    pub fn new(network: Arc<N>, network_id: NetworkId, include_body: bool) -> Self {
         let peers = Arc::new(RwLock::new(PeerList::default()));
         let mut network_event_rx = network.subscribe_events();
 
@@ -172,7 +173,7 @@ impl<N: Network> BlockRequestComponent<N> {
                     }
                     .boxed()
                 },
-                |request, response, _| {
+                |request, response, network_id| {
                     // We check general consistency for the response:
                     // 1. Check that the blocks end on target block or macro block
                     // 2. Verify macro block signature (last block)
@@ -206,6 +207,24 @@ impl<N: Network> BlockRequestComponent<N> {
                             );
                             return false;
                         }
+
+                        // Verify the header before the chain is hashed below, to cheaply reject
+                        // malformed blocks (wrong network/version, oversized extra data, or — for
+                        // election blocks — a structurally invalid validator set) without
+                        // buffering them.
+                        // `max_timestamp` is `u64::MAX` because these are historical blocks
+                        // requested by hash/height: the future-drift check is only meaningful for
+                        // live blocks and is re-applied with the real clock at push time
+                        if let Err(error) =
+                            block.verify_header(*network_id, block.is_skip(), u64::MAX)
+                        {
+                            log::error!(
+                                %block,
+                                %error,
+                                "Received missing block with an invalid header"
+                            );
+                            return false;
+                        }
                     }
 
                     // Checks that the first block's parent was part of the block locators.
@@ -224,16 +243,24 @@ impl<N: Network> BlockRequestComponent<N> {
                         return false;
                     }
 
-                    // Check that the last block is valid.
-                    // The last block must be the target block or a macro block.
+                    // Check that the last block is valid. If it is at the target height it must
+                    // be the requested target block, i.e. its hash must match the requested one
+                    // (this holds for both macro and micro target blocks). Otherwise it must be
+                    // an intermediate macro block below the target that serves as a valid
+                    // stopping point; the rest of the chain up to the target is fetched by
+                    // follow-up requests.
                     let last_block = blocks.last_mut().unwrap(); // cannot be empty
                     let block_hash = last_block.hash_cached();
-                    if !(last_block.is_macro()
-                        || (last_block.block_number() == request.target_block_number
-                            && block_hash == request.target_block_hash))
-                    {
+                    let valid_last_block =
+                        if last_block.block_number() == request.target_block_number {
+                            block_hash == request.target_block_hash
+                        } else {
+                            last_block.is_macro()
+                        };
+                    if !valid_last_block {
                         log::error!(
                             request.target_block_number,
+                            last_block = last_block.block_number(),
                             %block_hash,
                             %request.target_block_hash,
                             "Received invalid missing blocks (invalid target block)"
@@ -270,7 +297,7 @@ impl<N: Network> BlockRequestComponent<N> {
 
                     true
                 },
-                (),
+                network_id,
             ),
             peers,
             include_body,

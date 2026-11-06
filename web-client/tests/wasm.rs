@@ -6,14 +6,15 @@ use std::{
 use futures::{poll, Stream, StreamExt};
 use nimiq_blockchain_proxy::BlockchainProxy;
 use nimiq_consensus::{sync::syncer_proxy::SyncerProxy, BlsCache, Consensus};
-use nimiq_genesis::NetworkId;
+use nimiq_genesis::NetworkId::UnitAlbatross;
 use nimiq_light_blockchain::LightBlockchain;
 use nimiq_network_interface::network::{Network, Topic};
 use nimiq_network_mock::MockHub;
 use nimiq_primitives::policy;
-use nimiq_zkp_component::ZKPComponent;
+use nimiq_web_client::common::client_configuration::ClientConfiguration;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -27,12 +28,9 @@ pub async fn it_can_initialize_with_mock_network() {
 
     let mock_network = Arc::new(hub.new_network());
 
-    let blockchain = Arc::new(RwLock::new(LightBlockchain::new(NetworkId::DevAlbatross)));
+    let blockchain = Arc::new(RwLock::new(LightBlockchain::new(UnitAlbatross)));
 
     let blockchain_proxy = BlockchainProxy::from(&blockchain);
-
-    let zkp_component =
-        ZKPComponent::new(blockchain_proxy.clone(), Arc::clone(&mock_network), None).await;
 
     let bls_cache = Arc::new(Mutex::new(BlsCache::default()));
 
@@ -42,7 +40,6 @@ pub async fn it_can_initialize_with_mock_network() {
         blockchain_proxy.clone(),
         Arc::clone(&mock_network),
         bls_cache,
-        zkp_component.proxy(),
         network_events,
     )
     .await;
@@ -53,7 +50,6 @@ pub async fn it_can_initialize_with_mock_network() {
         Arc::clone(&mock_network),
         syncer,
         3,
-        zkp_component.proxy(),
         Arc::new(AtomicU32::new(0)),
     );
 
@@ -103,4 +99,28 @@ async fn gossipsub_web_env() {
     log::info!("Received Gossipsub message: {:?}", received_message);
 
     assert_eq!(received_message, test_message);
+}
+
+#[wasm_bindgen_test]
+fn seed_nodes_rejects_non_string_entries() {
+    let mut config = ClientConfiguration::new();
+
+    let bad: Box<[JsValue]> = Box::new([
+        JsValue::from_str("/dns4/x.example/tcp/443/wss"),
+        JsValue::from(42_u32),
+    ]);
+    assert!(config.seed_nodes(bad).is_err());
+
+    let good: Box<[JsValue]> = Box::new([
+        JsValue::from_str("/dns4/x.example/tcp/443/wss"),
+        JsValue::from_str("/dns4/y.example/tcp/443/wss"),
+    ]);
+    assert!(config.seed_nodes(good).is_ok());
+    assert_eq!(
+        config.seed_nodes,
+        vec![
+            "/dns4/x.example/tcp/443/wss".to_string(),
+            "/dns4/y.example/tcp/443/wss".to_string(),
+        ]
+    );
 }

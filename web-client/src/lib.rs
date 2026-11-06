@@ -13,6 +13,7 @@ mod primitives;
 
 #[cfg(test)]
 mod tests {
+    use nimiq_primitives::policy::{Policy, TEST_POLICY};
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -27,6 +28,8 @@ mod tests {
 
     #[wasm_bindgen_test]
     pub fn it_can_create_and_sign_basic_transactions() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+
         let keypair = KeyPair::generate();
 
         let mut tx = TransactionBuilder::new_basic(
@@ -43,11 +46,18 @@ mod tests {
         .unwrap();
 
         tx.do_sign(&keypair, None).map_err(JsValue::from).unwrap();
-        assert_eq!(tx.verify(None).map_err(JsValue::from), Ok(()))
+        assert_eq!(tx.verify(0, None).map_err(JsValue::from), Ok(()));
+        assert_eq!(
+            tx.verify(Policy::max_supported_version(), None)
+                .map_err(JsValue::from),
+            Ok(())
+        )
     }
 
     #[wasm_bindgen_test]
     pub fn it_can_create_and_sign_validator_transactions() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+
         let keypair = KeyPair::generate();
 
         let mut tx = TransactionBuilder::new_create_validator(
@@ -64,6 +74,11 @@ mod tests {
         .unwrap();
 
         tx.do_sign(&keypair, None).map_err(JsValue::from).unwrap();
-        assert_eq!(tx.verify(None).map_err(JsValue::from), Ok(()))
+        assert_eq!(tx.verify(0, None).map_err(JsValue::from), Ok(()));
+        assert_eq!(
+            tx.verify(Policy::max_supported_version(), None)
+                .map_err(JsValue::from),
+            Ok(())
+        )
     }
 }

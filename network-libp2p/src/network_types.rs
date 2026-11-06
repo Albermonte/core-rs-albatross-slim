@@ -15,10 +15,10 @@ use nimiq_network_interface::{
     network::{CloseReason, MsgAcceptance, PubsubId, Topic},
     peer_info::Services,
     request::{RequestError, RequestType},
+    validator_record::ValidatorRecord,
 };
 use nimiq_serde::{Deserialize, DeserializeError};
 use nimiq_utils::tagged_signing::{TaggedSignable, TaggedSigned};
-use nimiq_validator_network::validator_record::ValidatorRecord;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -59,6 +59,7 @@ pub(crate) enum NetworkAction {
             >,
         >,
         rate_limit_config: RateLimitConfig,
+        max_message_size: usize,
     },
     Unsubscribe {
         topic_name: String,
@@ -90,6 +91,7 @@ pub(crate) enum NetworkAction {
     },
     ListenOn {
         listen_addresses: Vec<Multiaddr>,
+        output: oneshot::Sender<Result<(), NetworkError>>,
     },
     ConnectPeersByServices {
         services: Services,
@@ -224,6 +226,7 @@ pub(crate) struct GossipsubTopicInfo {
     pub(crate) output: mpsc::Sender<(gossipsub::Message, gossipsub::MessageId, PeerId)>,
     pub(crate) validate: bool,
     pub(crate) rate_limit_config: RateLimitConfig,
+    pub(crate) max_message_size: usize,
 }
 
 #[derive(Default)]

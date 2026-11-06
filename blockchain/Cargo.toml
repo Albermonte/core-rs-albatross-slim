@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Persistent block storage for Nimiq's Albatross implementation"
 homepage.workspace = true
 repository.workspace = true
@@ -24,11 +25,11 @@ futures = { workspace = true }
 hex = "0.4"
 log = { workspace = true }
 parking_lot = "0.12"
-prometheus-client = { version = "0.24.0", optional = true }
-rand = "0.9"
+prometheus-client = { version = "0.25.0", optional = true }
+rand = "0.10"
 serde = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.49", features = ["sync"] }
+tokio = { version = "1.52", features = ["sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 nimiq-account = { workspace = true, features = ["accounts"] }
@@ -49,11 +50,10 @@ nimiq-transaction = { workspace = true }
 nimiq-trie = { workspace = true }
 nimiq-utils = { workspace = true, features = ["time"] }
 nimiq-vrf = { workspace = true }
-nimiq-zkp = { workspace = true }
 
 [dev-dependencies]
-rand_chacha = "0.9"
-tempfile = "3.24"
+rand_chacha = "0.10"
+tempfile = "3.27"
 
 nimiq-tendermint = { workspace = true }
 nimiq-test-log = { workspace = true }
@@ -61,7 +61,6 @@ nimiq-transaction-builder = { workspace = true }
 # This adds a circular dev-dependency which is fine but breaks VS code rust-analyzer.
 # See https://github.com/rust-analyzer/rust-analyzer/issues/14167
 nimiq-test-utils = { workspace = true }
-nimiq-zkp-primitives = { workspace = true }
 
 [features]
 expensive-tests = []

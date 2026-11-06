@@ -4,9 +4,9 @@ use nimiq_account::{BlockLog, BlockLogger};
 use nimiq_blockchain_interface::{ChainInfo, PushError};
 use nimiq_database::mdbx::{MdbxReadTransaction, MdbxWriteTransaction};
 use nimiq_hash::Blake2bHash;
-use nimiq_primitives::trie::trie_diff::TrieDiff;
+use nimiq_primitives::{policy::Policy, trie::trie_diff::TrieDiff};
 
-use crate::Blockchain;
+use crate::{history::interface::HistoryInterface, Blockchain};
 
 impl Blockchain {
     /// Finds the common ancestor between the current main chain in the context of `txn` and the fork chain given by
@@ -92,6 +92,13 @@ impl Blockchain {
         (Vec<(Blake2bHash, ChainInfo)>, Vec<BlockLog>),
         Vec<(Blake2bHash, ChainInfo, Option<TrieDiff>)>,
     > {
+        // Rebranching to an empty target chain is not meaningful: there is nothing
+        // to apply and the ancestor would become the new head, which the callers
+        // do not handle. Reject so the proposal/push is treated as an invalid fork.
+        if target_chain.is_empty() {
+            return Err(vec![]);
+        }
+
         // Keeps track of the currently investigated block
         let mut current = (self.state.head_hash.clone(), self.state.main_chain.clone());
         // Collects the reverted blocks
@@ -182,9 +189,12 @@ impl Blockchain {
         // Next, push each block of the target chain.
 
         // Pushing must happen in reverse.
-        let mut target_chain_iter = target_chain.iter().rev();
+        let mut prev_chain_info = ancestor.1.clone();
 
-        while let Some(block) = target_chain_iter.next() {
+        for i in (0..target_chain.len()).rev() {
+            let block = &mut target_chain[i];
+            // Reverting chunks above may have changed the missing range since the block was stored.
+            block.1.prev_missing_range = self.get_missing_accounts_range(Some(write_txn));
             // Collect logs for the upcoming push.
             let mut block_logger = BlockLogger::new_applied(
                 block.0.clone(),
@@ -199,9 +209,20 @@ impl Blockchain {
                 write_txn,
                 &mut block_logger,
             ) {
-                Ok(total_tx_size)
-                    // push the logs into the logs collection
-                    => block_logs.push(block_logger.build(total_tx_size)),
+                Ok(total_tx_size) => {
+                    block.1.history_tree_len = self.history_store.total_len_at_epoch(
+                        Policy::epoch_at(block.1.head.block_number()),
+                        Some(write_txn),
+                    ) as u64;
+                    block
+                        .1
+                        .set_cumulative_hist_tx_size(&prev_chain_info, total_tx_size);
+
+                    // Push the logs into the logs collection once the chain info matches the
+                    // committed history state for this adopted block.
+                    block_logs.push(block_logger.build(total_tx_size));
+                    prev_chain_info = block.1.clone();
+                }
                 Err(e) => {
                     // If a block fails to apply here it does not verify fully.
                     // This block and all blocks after this thus should be removed from the store
@@ -216,10 +237,7 @@ impl Blockchain {
 
                     // Since a write txn is open which cannot be closed the vec of the to-be-removed
                     // blocks is returned so the caller side can deal with it.
-                    let remove_chain = vec![block.clone()]
-                        .into_iter()
-                        .chain(target_chain_iter.cloned())
-                        .collect();
+                    let remove_chain = target_chain[..=i].iter().rev().cloned().collect();
                     return Err(remove_chain);
                 }
             }

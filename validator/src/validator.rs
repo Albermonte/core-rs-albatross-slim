@@ -189,7 +189,7 @@ where
 
         let mempool = MempoolTask::new(consensus, Arc::clone(&blockchain), mempool_config);
 
-        Self::init_network_request_receivers(&consensus.network, &macro_state);
+        Self::init_network_request_receivers(&consensus.network, &network, &macro_state);
 
         let network1 = Arc::clone(&network);
         spawn(async move {
@@ -236,11 +236,28 @@ where
     }
 
     fn init_network_request_receivers(
-        network: &Arc<TValidatorNetwork::NetworkType>,
+        raw_network: &Arc<TValidatorNetwork::NetworkType>,
+        validator_network: &Arc<TValidatorNetwork>,
         macro_state: &Arc<RwLock<Option<MacroState>>>,
     ) {
-        let stream = network.receive_requests::<RequestProposal>();
-        spawn(Box::pin(request_handler(network, stream, macro_state)));
+        // Proposal requests are sent through the validator network (see
+        // `TendermintProtocol::request_proposal`), which wraps them in a
+        // `ValidatorMessage` and therefore uses a distinct wire `TYPE_ID`. They
+        // must be received on the validator network as well, otherwise the
+        // `TYPE_ID` does not match and the request never reaches this handler.
+        //
+        // The validator network already unwraps the message and validates the
+        // sender, yielding the validator id instead of a peer id. The
+        // `RequestProposal` handler does not use the peer id, so we substitute the
+        // local peer id in order to reuse the generic `request_handler`. The
+        // request id is the underlying network's request id, so the response is
+        // served on the raw network and routed back to the requester by id.
+        let local_peer_id = raw_network.get_local_peer_id();
+        let stream = validator_network
+            .receive_requests::<RequestProposal>()
+            .map(move |(request, request_id, _validator_id)| (request, request_id, local_peer_id))
+            .boxed();
+        spawn(Box::pin(request_handler(raw_network, stream, macro_state)));
     }
 
     fn init(&mut self, head_hash: Option<&Blake2bHash>) {
@@ -340,7 +357,9 @@ where
         state.slot_band = validators.get_slot_band_by_address(&state.validator_address);
 
         if let Some(slot_band) = state.slot_band {
-            let epoch_validator = validators.get_validator_by_slot_band(slot_band);
+            let epoch_validator = validators
+                .get_validator_by_slot_band(slot_band)
+                .expect("validator slot band from address lookup must exist");
             log::info!(
                 validator_address = %state.validator_address,
                 validator_slot_band = slot_band,
@@ -436,7 +455,11 @@ where
                 let equivocation_proofs = state
                     .consensus
                     .equivocation_proofs
-                    .get_equivocation_proofs_for_block(Self::EQUIVOCATION_PROOFS_MAX_SIZE);
+                    .get_equivocation_proofs_for_block(
+                        next_block_number,
+                        blockchain.protocol_version(),
+                        Self::EQUIVOCATION_PROOFS_MAX_SIZE,
+                    );
                 let prev_seed = head.seed().clone();
 
                 self.micro_producer = Some(ProduceMicroBlock::new(
@@ -479,6 +502,9 @@ where
             BlockchainEvent::HistoryAdopted(_) | BlockchainEvent::Stored(_) => {
                 // Nothing to do here for now. Forks are already reported on `fork_event_rx`
                 // and inferior chain blocks are irrelevant here.
+            }
+            BlockchainEvent::ProtocolUpgrade(..) => {
+                // Nothing to do here for the validator logic.
             }
         }
     }
@@ -691,6 +717,16 @@ where
 
     pub fn state(&self) -> &Arc<RwLock<ValidatorState>> {
         &self.state
+    }
+
+    /// Returns a handle to the cached macro block state. This is the same state
+    /// that is served in response to [`RequestProposal`] requests.
+    ///
+    /// Only available when the `test-accessors` feature is enabled, as it exposes
+    /// internal state that should not be reachable in production builds.
+    #[cfg(feature = "test-accessors")]
+    pub fn macro_state(&self) -> &Arc<RwLock<Option<MacroState>>> {
+        &self.macro_state
     }
 
     #[cfg(feature = "metrics")]

@@ -123,8 +123,9 @@ impl<N: Network> BlockQueue<N> {
         let current_macro_height = Policy::last_macro_block(blockchain.read().block_number());
         let blockchain_rx = blockchain.read().notifier_as_stream();
         let fork_rx = blockchain.read().fork_notifier_as_stream();
+        let network_id = blockchain.read().network_id();
         let request_component =
-            BlockRequestComponent::new(Arc::clone(&network), config.include_body);
+            BlockRequestComponent::new(Arc::clone(&network), network_id, config.include_body);
 
         Self {
             config,
@@ -159,6 +160,17 @@ impl<N: Network> BlockQueue<N> {
         }
 
         let blockchain = self.blockchain.read();
+
+        // Cheaply reject malformed headers (e.g. a structurally invalid validator set) before
+        // hashing or buffering them.
+        let max_timestamp = blockchain.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        if block
+            .verify_header(blockchain.network_id(), block.is_skip(), max_timestamp)
+            .is_err()
+        {
+            block_source.reject_block(&self.network);
+            return None;
+        }
 
         let block_hash = block.hash_cached();
         let block_number = block.block_number();
@@ -318,7 +330,7 @@ impl<N: Network> BlockQueue<N> {
         // Enforce a maximum number of announced blocks per peer per block number.
         let peer_id = block_source.peer_id();
         let mut num_buffered_blocks = 0;
-        for (_, (_, block_source)) in map.iter() {
+        for (_, block_source) in map.values() {
             // Don't count blocks that we requested.
             if block_source.is_requested() {
                 continue;
@@ -520,9 +532,7 @@ impl<N: Network> BlockQueue<N> {
                     block_infos.push(block);
                 }
             }
-            BlockchainEvent::HistoryAdopted(block_hash)
-            | BlockchainEvent::Finalized(block_hash)
-            | BlockchainEvent::EpochFinalized(block_hash) => {
+            BlockchainEvent::HistoryAdopted(block_hash) => {
                 if let Ok(block) = self.blockchain.read().get_block(&block_hash, false) {
                     block_infos.push(block);
                 }
@@ -534,6 +544,11 @@ impl<N: Network> BlockQueue<N> {
             }
             BlockchainEvent::Stored(block) => {
                 block_infos.push(block);
+            }
+            BlockchainEvent::Finalized(_)
+            | BlockchainEvent::EpochFinalized(_)
+            | BlockchainEvent::ProtocolUpgrade(..) => {
+                // these events do not include new blocks, so we don't add anything.
             }
         }
         block_infos
@@ -765,8 +780,10 @@ impl<N: Network> BlockQueue<N> {
             .collect()
     }
 
-    /// Returns the number of buffered blocks.
-    pub(crate) fn num_buffered_blocks(&self) -> usize {
+    /// Returns the number of block heights with buffered blocks. Each height contributes at most
+    /// one block to the chain, so this is the number of blocks still missing to reach the tip of
+    /// the buffer.
+    pub(crate) fn num_buffered_heights(&self) -> usize {
         self.buffer.len()
     }
 

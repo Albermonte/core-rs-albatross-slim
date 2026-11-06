@@ -9,13 +9,13 @@ use crate::{
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde-derive", derive(nimiq_hash_derive::SerializeContent))]
-pub struct ES256PublicKey(pub p256::EncodedPoint);
+pub struct ES256PublicKey(pub p256::Sec1Point);
 
 impl ES256PublicKey {
     pub const SIZE: usize = 33;
 
     pub fn verify(&self, signature: &ES256Signature, data: &[u8]) -> bool {
-        if let Ok(vk) = p256::ecdsa::VerifyingKey::from_encoded_point(&self.0) {
+        if let Ok(vk) = p256::ecdsa::VerifyingKey::from_sec1_point(&self.0) {
             p256::ecdsa::signature::Verifier::verify(&vk, data, &signature.0).is_ok()
         } else {
             false
@@ -32,7 +32,7 @@ impl ES256PublicKey {
 
     #[inline]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, KeysError> {
-        p256::EncodedPoint::from_bytes(bytes)
+        p256::Sec1Point::from_bytes(bytes)
             .map_err(|_| KeysError::MalformedPublicKey)
             .map(ES256PublicKey)
     }
@@ -71,15 +71,19 @@ impl FromStr for ES256PublicKey {
     }
 }
 
-impl<'a> From<&'a [u8; ES256PublicKey::SIZE]> for ES256PublicKey {
-    fn from(bytes: &'a [u8; ES256PublicKey::SIZE]) -> Self {
-        Self::from_bytes(bytes).expect("Unexpected size for")
+impl<'a> TryFrom<&'a [u8; ES256PublicKey::SIZE]> for ES256PublicKey {
+    type Error = KeysError;
+
+    fn try_from(bytes: &'a [u8; ES256PublicKey::SIZE]) -> Result<Self, Self::Error> {
+        Self::from_bytes(bytes)
     }
 }
 
-impl From<[u8; ES256PublicKey::SIZE]> for ES256PublicKey {
-    fn from(bytes: [u8; ES256PublicKey::SIZE]) -> Self {
-        ES256PublicKey::from(&bytes)
+impl TryFrom<[u8; ES256PublicKey::SIZE]> for ES256PublicKey {
+    type Error = KeysError;
+
+    fn try_from(bytes: [u8; ES256PublicKey::SIZE]) -> Result<Self, Self::Error> {
+        Self::from_bytes(&bytes)
     }
 }
 

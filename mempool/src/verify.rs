@@ -28,21 +28,24 @@ pub enum VerifyErr {
     Filtered,
     #[error("Can't verify transaction without consensus")]
     NoConsensus,
+    #[error("Sender has reached the maximum number of transactions in the mempool")]
+    SenderLimitReached,
 }
 
 /// Verifies a transaction and adds it to the mempool.
 pub(crate) fn verify_tx(
     mut transaction: Transaction,
     blockchain: Arc<RwLock<Blockchain>>,
+    protocol_version: u16,
     network_id: NetworkId,
     mempool_state: &Arc<RwLock<MempoolState>>,
     filter: Arc<RwLock<MempoolFilter>>,
     priority: TxPriority,
 ) -> Result<(), VerifyErr> {
-    // 1. Verify transaction signature (and other stuff)
-    transaction.verify_mut(network_id)?;
+    // 1. Verify transaction signature (and other stuff) using the cached protocol version.
+    transaction.verify_mut(network_id, protocol_version)?;
 
-    // 2. Acquire blockchain read lock
+    // 2. Acquire blockchain read lock for state-dependent checks.
     let blockchain = blockchain.read();
 
     // 3. Check validity window and already included

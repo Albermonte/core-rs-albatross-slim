@@ -4,6 +4,7 @@ version.workspace = true
 authors = ["Pascal B <git@paberr.net>", "The Nimiq Core Development Team <info@nimiq.com>"]
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Common wrapper around hash implementations used in Nimiq"
 homepage.workspace = true
 repository.workspace = true
@@ -25,7 +26,7 @@ byteorder = "1.5"
 hex = "0.4"
 rust-argon2 = "3.0"
 serde = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2.6"
 
 nimiq-database-value = { workspace = true }

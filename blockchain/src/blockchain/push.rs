@@ -122,7 +122,7 @@ impl Blockchain {
 
         read_txn.close();
 
-        let chain_info = ChainInfo::from_block(block, &prev_info, prev_missing_range);
+        let chain_info = ChainInfo::from_block(block, &prev_info, prev_missing_range)?;
 
         // Extend, rebranch or just store the block depending on the chain ordering.
         let result = match chain_order {
@@ -385,11 +385,16 @@ impl Blockchain {
 
         txn.commit();
 
+        let is_protocol_upgrade = chain_info.head.version() > this.state.current_version();
         if let Block::Macro(ref macro_block) = chain_info.head {
             this.state.macro_info = chain_info.clone();
             this.state.macro_head_hash = block_hash.clone();
 
             if is_election_block {
+                // The hardcoded checkpoint is intentionally not verified on this live extend path
+                // (nor on rebranch): checkpoints always reference a *past* election block, which
+                // full nodes verify during history-sync catch-up, and a live-tip election event
+                // cannot cross a past checkpoint. See `nimiq_genesis::verify_election_checkpoint`.
                 this.state.election_head = macro_block.clone();
                 this.state.election_head_hash = block_hash.clone();
 
@@ -426,6 +431,14 @@ impl Blockchain {
             .send(BlockchainEvent::Extended(block_hash.clone()))
             .ok();
         if is_election_block {
+            if is_protocol_upgrade {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        block_hash.clone(),
+                        this.state.current_version(),
+                    ))
+                    .ok();
+            }
             this.notifier
                 .send(BlockchainEvent::EpochFinalized(block_hash))
                 .ok();
@@ -506,6 +519,7 @@ impl Blockchain {
 
         write_txn.commit();
 
+        let is_protocol_upgrade = new_head_info.head.version() > this.state.current_version();
         if let Block::Macro(ref macro_block) = new_head_info.head {
             this.state.macro_info = new_head_info.clone();
             this.state.macro_head_hash = new_head_hash.clone();
@@ -568,6 +582,14 @@ impl Blockchain {
             .send(BlockchainEvent::Rebranched(reverted_blocks, adopted_blocks))
             .ok();
         if this.state.main_chain.head.is_election() {
+            if is_protocol_upgrade {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        this.state.head_hash.clone(),
+                        this.state.current_version(),
+                    ))
+                    .ok();
+            }
             this.notifier
                 .send(BlockchainEvent::EpochFinalized(
                     this.state.head_hash.clone(),
@@ -633,6 +655,7 @@ impl Blockchain {
             })?;
             if is_complete {
                 let recorded_diff = txn.stop_recording().into_forward_diff();
+                self.verify_diff_root(block, &recorded_diff)?;
                 self.chain_store
                     .put_accounts_diff(txn.raw(), &block.hash(), &recorded_diff);
             }

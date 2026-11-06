@@ -2,7 +2,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use std::{collections::HashSet, fmt, sync::Arc, task::Waker};
+use std::{collections::HashMap, fmt, sync::Arc, task::Waker};
 
 use futures::Stream;
 use nimiq_utils::WakerExt;
@@ -10,6 +10,23 @@ use nimiq_utils::WakerExt;
 use crate::{
     contribution::AggregatableContribution, evaluator::Evaluator, protocol::Protocol, Identifier,
 };
+
+/// Distinguishes the two contributions a single `LevelUpdate` can carry, so keeping the aggregate
+/// does not evict the individual (and vice versa).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Kind {
+    Aggregate,
+    Individual,
+}
+
+/// Key into the pending list. At most one entry is kept per key, so a sender cannot inflate the
+/// list with distinct bitsets.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct PendingKey {
+    level: usize,
+    origin: usize,
+    kind: Kind,
+}
 
 /// A PendingContribution represents a contribution which has not yet been aggregated into the store.
 /// For the most part a wrapper for the contribution within.
@@ -57,23 +74,6 @@ impl<C: AggregatableContribution> PendingContribution<C> {
     }
 }
 
-impl<C: AggregatableContribution> PartialEq for PendingContribution<C> {
-    fn eq(&self, other: &PendingContribution<C>) -> bool {
-        self.level == other.level
-            && self.contribution.contributors() == other.contribution.contributors()
-    }
-}
-
-impl<C: AggregatableContribution> Eq for PendingContribution<C> {}
-
-impl<C: AggregatableContribution> std::hash::Hash for PendingContribution<C> {
-    // TODO
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::hash::Hash::hash(&self.level, state);
-        std::hash::Hash::hash(&self.contribution.contributors().to_string(), state);
-    }
-}
-
 /// Implements Stream to poll for the next best scoring PendingContribution.
 /// Will dry the input stream every time a PendingContribution is polled.
 pub(crate) struct PendingContributionList<TId, TProtocol>
@@ -83,8 +83,9 @@ where
 {
     /// The ID of this aggregation.
     id: TId,
-    /// List of PendingContributions already polled from input stream.
-    list: HashSet<PendingContribution<TProtocol::Contribution>>,
+    /// PendingContributions already polled from input stream, keyed by `(level, origin, kind)` so
+    /// each sender occupies at most one slot per kind.
+    list: HashMap<PendingKey, PendingContribution<TProtocol::Contribution>>,
     /// The evaluator used for scoring an individual PendingContribution.
     evaluator: Arc<TProtocol::Evaluator>,
     /// Waker to wake the task when a contribution is added manually.
@@ -102,7 +103,7 @@ where
     pub fn new(id: TId, evaluator: Arc<TProtocol::Evaluator>) -> Self {
         Self {
             id,
-            list: HashSet::new(),
+            list: HashMap::new(),
             evaluator,
             waker: None,
         }
@@ -113,18 +114,33 @@ where
         contribution: TProtocol::Contribution,
         level: usize,
         origin: usize,
+        kind: Kind,
         trusted: bool,
     ) {
-        // Add the item to the list.
-        self.list.insert(PendingContribution {
-            contribution,
-            level,
-            origin,
-            trusted,
-        });
+        // Keep at most one entry per (level, origin, kind); a newer update replaces the sender's
+        // previous one instead of accumulating.
+        self.list.insert(
+            PendingKey {
+                level,
+                origin,
+                kind,
+            },
+            PendingContribution {
+                contribution,
+                level,
+                origin,
+                trusted,
+            },
+        );
 
         // Wake the task to process this contribution.
         self.waker.wake();
+    }
+
+    /// Number of pending contributions currently stored.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.list.len()
     }
 }
 
@@ -138,20 +154,17 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // The current best score.
         let mut best_score: usize = 0;
-        // The current best PendingContribution.
-        let mut best_contribution: Option<Self::Item> = None;
-        // Retained set of PendingContributions. Same as `self.list`, but does not retain 0-score
-        // PendingContributions and the best PendingContribution.
-        let mut retain_set: HashSet<Self::Item> = HashSet::new();
+        // The current best PendingContribution and its key.
+        let mut best: Option<(PendingKey, Self::Item)> = None;
+        // Retained entries. Same as `self.list`, but without 0-score entries and the best one.
+        let mut retain: HashMap<PendingKey, Self::Item> = HashMap::new();
         // A local copy is needed so self is not borrowed.
         let evaluator = Arc::clone(&self.evaluator);
         let id = self.id.clone();
 
         // Scoring of items needs to be done every time an item is polled, as the scores might have
         // changed with the last aggregated contribution.
-
-        // Score already available PendingContributions first.
-        for item in self.list.drain() {
+        for (key, item) in self.list.drain() {
             // Use the evaluator to compute the score of the contribution.
             let score = item.evaluate::<TId, TProtocol>(Arc::clone(&evaluator), id.clone());
 
@@ -163,28 +176,223 @@ where
             // Check if this item is the new best.
             if score > best_score {
                 // Push the old best into the retained set.
-                if let Some(old_best) = best_contribution.take() {
-                    retain_set.insert(old_best);
+                if let Some((old_key, old_item)) = best.take() {
+                    retain.insert(old_key, old_item);
                 }
                 // Remember the new best.
                 best_score = score;
-                best_contribution = Some(item);
+                best = Some((key, item));
             } else {
                 // In case the item is not the new best, push it into the retained set.
-                retain_set.insert(item);
+                retain.insert(key, item);
             }
         }
 
         // Update PendingContributions with the retained list of PendingContributions.
-        self.list = retain_set;
+        self.list = retain;
 
         // Return the best contribution if we have one.
-        if best_contribution.is_some() {
-            return Poll::Ready(best_contribution);
+        if let Some((_, best_item)) = best {
+            return Poll::Ready(Some(best_item));
         }
 
         // Wait for more contributions.
         self.waker.store_waker(cx);
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nimiq_bls::PublicKey;
+    use nimiq_collections::bitset::BitSet;
+    use parking_lot::RwLock;
+    use serde::{Deserialize, Serialize};
+
+    use super::{Kind, PendingContributionList};
+    use crate::{
+        contribution::{AggregatableContribution, ContributionError},
+        evaluator::WeightedVote,
+        identity::{Identity, IdentityRegistry, WeightRegistry},
+        partitioner::{BinomialPartitioner, Partitioner},
+        protocol,
+        store::ReplaceStore,
+        verifier::{VerificationResult, Verifier},
+    };
+
+    // Minimal mock protocol, mirroring the one in `tests/mod.rs`.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Contribution {
+        contributors: BitSet,
+    }
+
+    impl Contribution {
+        fn with_signer(signer: usize) -> Self {
+            let mut contributors = BitSet::new();
+            contributors.insert(signer);
+            Self { contributors }
+        }
+    }
+
+    impl AggregatableContribution for Contribution {
+        fn contributors(&self) -> BitSet {
+            self.contributors.clone()
+        }
+
+        fn combine(&mut self, other: &Self) -> Result<(), ContributionError> {
+            let overlap = &self.contributors & &other.contributors;
+            if overlap.is_empty() {
+                self.contributors = &self.contributors | &other.contributors;
+                Ok(())
+            } else {
+                Err(ContributionError::Overlapping(overlap))
+            }
+        }
+    }
+
+    struct Registry;
+
+    impl WeightRegistry for Registry {
+        fn weight(&self, _id: usize) -> Option<usize> {
+            Some(1)
+        }
+    }
+
+    impl IdentityRegistry for Registry {
+        fn public_key(&self, _id: usize) -> Option<PublicKey> {
+            None
+        }
+
+        fn signers_identity(&self, slots: &BitSet) -> Identity {
+            Identity::new(slots.clone())
+        }
+    }
+
+    struct DumbVerifier;
+
+    impl Verifier for DumbVerifier {
+        type Contribution = Contribution;
+        async fn verify(&self, _contribution: &Self::Contribution) -> VerificationResult {
+            VerificationResult::Ok
+        }
+    }
+
+    struct Protocol {
+        partitioner: Arc<BinomialPartitioner>,
+        evaluator: Arc<WeightedVote<usize, Self>>,
+        store: Arc<RwLock<ReplaceStore<usize, Self>>>,
+        registry: Arc<Registry>,
+        verifier: Arc<DumbVerifier>,
+    }
+
+    impl Protocol {
+        fn new(node_id: usize, num_ids: usize) -> Self {
+            let partitioner = Arc::new(BinomialPartitioner::new(node_id, num_ids));
+            let registry = Arc::new(Registry);
+            let store = Arc::new(RwLock::new(ReplaceStore::<usize, Self>::new(
+                partitioner.clone(),
+            )));
+            let evaluator = Arc::new(WeightedVote::new(
+                store.clone(),
+                registry.clone(),
+                partitioner.clone(),
+                |aggregate: &Contribution,
+                 registry: &Registry,
+                 partitioner: &BinomialPartitioner| {
+                    registry.signers_identity(&aggregate.contributors()).len() == partitioner.size()
+                },
+            ));
+
+            Self {
+                partitioner,
+                evaluator,
+                store,
+                registry,
+                verifier: Arc::new(DumbVerifier),
+            }
+        }
+    }
+
+    impl std::fmt::Debug for Protocol {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("Protocol")
+        }
+    }
+
+    impl protocol::Protocol<usize> for Protocol {
+        type Contribution = Contribution;
+        type Registry = Registry;
+        type Verifier = DumbVerifier;
+        type Store = ReplaceStore<usize, Self>;
+        type Evaluator = WeightedVote<usize, Self>;
+        type Partitioner = BinomialPartitioner;
+
+        fn registry(&self) -> Arc<Self::Registry> {
+            self.registry.clone()
+        }
+        fn verifier(&self) -> Arc<Self::Verifier> {
+            self.verifier.clone()
+        }
+        fn store(&self) -> Arc<RwLock<Self::Store>> {
+            self.store.clone()
+        }
+        fn evaluator(&self) -> Arc<Self::Evaluator> {
+            self.evaluator.clone()
+        }
+        fn partitioner(&self) -> Arc<Self::Partitioner> {
+            self.partitioner.clone()
+        }
+        fn identify(&self) -> usize {
+            0
+        }
+        fn node_id(&self) -> usize {
+            0
+        }
+    }
+
+    // A single origin flooding distinct bitsets must not grow the pool.
+    #[test]
+    fn one_origin_cannot_inflate_the_pool() {
+        let protocol = Protocol::new(0, 8);
+        let mut list =
+            PendingContributionList::<usize, Protocol>::new(0, protocol.evaluator.clone());
+
+        for signer in 0..1_000 {
+            list.add_contribution(
+                Contribution::with_signer(signer),
+                1,
+                1,
+                Kind::Aggregate,
+                false,
+            );
+        }
+
+        assert!(list.len() <= 2, "pool grew to {}", list.len());
+    }
+
+    // Contributions from different origins must each be retained.
+    #[test]
+    fn distinct_origins_are_retained() {
+        let protocol = Protocol::new(0, 8);
+        let mut list =
+            PendingContributionList::<usize, Protocol>::new(0, protocol.evaluator.clone());
+
+        for origin in 1..=3 {
+            list.add_contribution(
+                Contribution::with_signer(origin),
+                1,
+                origin,
+                Kind::Aggregate,
+                false,
+            );
+        }
+
+        assert!(
+            list.len() >= 3,
+            "expected all 3 origins retained, got {}",
+            list.len()
+        );
     }
 }

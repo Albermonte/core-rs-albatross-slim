@@ -1,10 +1,17 @@
+mod common;
+
+use common::for_each_protocol_version;
 use nimiq_keys::{Address, KeyPair, PrivateKey};
 use nimiq_primitives::{
     account::AccountType, coin::Coin, networks::NetworkId, transaction::TransactionError,
 };
 use nimiq_serde::{Deserialize, DeserializeError, Serialize};
+use nimiq_test_log::test;
 use nimiq_transaction::{
-    account::{vesting_contract::CreationTransactionData, AccountTransactionVerification},
+    account::{
+        vesting_contract::{CreationTransactionData, MAX_TIME_VALUE},
+        AccountTransactionVerification,
+    },
     SignatureProof, Transaction, TransactionFlags,
 };
 
@@ -35,33 +42,41 @@ fn it_can_verify_creation_transaction() {
     );
 
     // Invalid data
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::InvalidData)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidData),
+        );
+    });
     CreationTransactionData::parse_data(&data, transaction.value).unwrap();
     transaction.recipient_data = data;
 
     // Invalid recipient
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::InvalidForRecipient)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidForRecipient),
+        );
+    });
     transaction.recipient = transaction.contract_creation_address();
 
     // Valid
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Ok(())
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Ok(()),
+        );
+    });
 
     // Invalid transaction flags
     transaction.flags = TransactionFlags::empty();
     transaction.recipient = transaction.contract_creation_address();
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::InvalidForRecipient)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidForRecipient),
+        );
+    });
     transaction.flags = TransactionFlags::CONTRACT_CREATION;
 
     // Valid
@@ -74,10 +89,12 @@ fn it_can_verify_creation_transaction() {
     CreationTransactionData::parse_data(&data, transaction.value).unwrap();
     transaction.recipient_data = data;
     transaction.recipient = transaction.contract_creation_address();
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Ok(())
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Ok(()),
+        );
+    });
 
     // Valid
     let mut data: Vec<u8> = Vec::with_capacity(Address::SIZE + 32);
@@ -90,10 +107,12 @@ fn it_can_verify_creation_transaction() {
     CreationTransactionData::parse_data(&data, transaction.value).unwrap();
     transaction.recipient_data = data;
     transaction.recipient = transaction.contract_creation_address();
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Ok(())
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Ok(()),
+        );
+    });
 
     // step amount > total amount
     let data = CreationTransactionData {
@@ -105,10 +124,85 @@ fn it_can_verify_creation_transaction() {
     };
     transaction.recipient_data = data.to_tx_data();
     transaction.recipient = transaction.contract_creation_address();
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Ok(())
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidData),
+        );
+    });
+}
+
+#[test]
+fn it_rejects_out_of_bounds_time_values() {
+    // `start_time` and `time_step` must be bounded to `MAX_TIME_VALUE` to avoid
+    // arithmetic blow-ups in `VestingContract::min_cap`.
+
+    let tx_value = Coin::try_from(100).unwrap();
+    let owner = Address::from([0u8; 20]);
+
+    let parse = |data: &CreationTransactionData| {
+        CreationTransactionData::parse_data(&data.to_tx_data(), tx_value)
+    };
+
+    // 8-byte variant: only `time_step` is serialized (step_amount == total_amount, start_time == 0).
+    let data = CreationTransactionData {
+        owner: owner.clone(),
+        start_time: 0,
+        time_step: MAX_TIME_VALUE + 1,
+        step_amount: tx_value,
+        total_amount: tx_value,
+    };
+    assert!(matches!(parse(&data), Err(TransactionError::InvalidData)));
+
+    // 24-byte variant: reject out-of-bound `start_time` (step_amount == total_amount).
+    let data = CreationTransactionData {
+        owner: owner.clone(),
+        start_time: MAX_TIME_VALUE + 1,
+        time_step: 100,
+        step_amount: tx_value,
+        total_amount: tx_value,
+    };
+    assert!(matches!(parse(&data), Err(TransactionError::InvalidData)));
+
+    // 24-byte variant: reject out-of-bound `time_step`.
+    let data = CreationTransactionData {
+        owner: owner.clone(),
+        start_time: 100,
+        time_step: MAX_TIME_VALUE + 1,
+        step_amount: tx_value,
+        total_amount: tx_value,
+    };
+    assert!(matches!(parse(&data), Err(TransactionError::InvalidData)));
+
+    // 32-byte variant: reject out-of-bound `start_time` (step_amount != total_amount).
+    let data = CreationTransactionData {
+        owner: owner.clone(),
+        start_time: MAX_TIME_VALUE + 1,
+        time_step: 100,
+        step_amount: Coin::try_from(50).unwrap(),
+        total_amount: tx_value,
+    };
+    assert!(matches!(parse(&data), Err(TransactionError::InvalidData)));
+
+    // 32-byte variant: reject out-of-bound `time_step`.
+    let data = CreationTransactionData {
+        owner: owner.clone(),
+        start_time: 100,
+        time_step: MAX_TIME_VALUE + 1,
+        step_amount: Coin::try_from(50).unwrap(),
+        total_amount: tx_value,
+    };
+    assert!(matches!(parse(&data), Err(TransactionError::InvalidData)));
+
+    // Boundary: `MAX_TIME_VALUE` itself is accepted.
+    let data = CreationTransactionData {
+        owner,
+        start_time: MAX_TIME_VALUE,
+        time_step: MAX_TIME_VALUE,
+        step_amount: tx_value,
+        total_amount: tx_value,
+    };
+    assert!(parse(&data).is_ok());
 }
 
 #[test]
@@ -125,29 +219,37 @@ fn it_can_verify_outgoing_transactions() {
     );
     tx.sender_type = AccountType::Vesting;
 
-    assert_eq!(
-        AccountType::verify_outgoing_transaction(&tx),
-        Err(TransactionError::InvalidSerialization(
-            DeserializeError::unexpected_end()
-        ))
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_outgoing_transaction(&tx, v),
+            Err(TransactionError::InvalidSerialization(
+                DeserializeError::unexpected_end()
+            )),
+        );
+    });
 
     let signature = key_pair.sign(&tx.serialize_content()[..]);
     let signature_proof = SignatureProof::from_ed25519(key_pair.public, signature);
     tx.proof = signature_proof.serialize_to_vec();
 
-    assert_eq!(AccountType::verify_outgoing_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_outgoing_transaction(&tx, v), Ok(()),);
+    });
 
     tx.proof[22] = tx.proof[22] % 250 + 1;
-    assert_eq!(
-        AccountType::verify_outgoing_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_outgoing_transaction(&tx, v),
+            Err(TransactionError::InvalidProof),
+        );
+    });
 
     tx.proof[22] = tx.proof[22] % 251 + 3;
     // Proof is not a valid point, so Deserialize will result in an error.
-    assert_eq!(
-        AccountType::verify_outgoing_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_outgoing_transaction(&tx, v),
+            Err(TransactionError::InvalidProof),
+        );
+    });
 }

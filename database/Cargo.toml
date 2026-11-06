@@ -7,7 +7,8 @@ authors = [
 ]
 license.workspace = true
 edition.workspace = true
-description = "A LMDB database wrapper with support for volatile storage"
+rust-version.workspace = true
+description = "An MDBX database wrapper with support for volatile storage"
 homepage.workspace = true
 repository.workspace = true
 categories.workspace = true
@@ -23,7 +24,7 @@ maintenance = { status = "experimental" }
 workspace = true
 
 [dependencies]
-libmdbx = "0.6.5"
+libmdbx = "0.6.6"
 log = { workspace = true }
 tempfile = "3"
 thiserror = "2.0"
@@ -37,7 +38,7 @@ pprof = { version = "0.15", features = [
     "frame-pointer",
     "criterion",
 ] }
-rand = "0.9"
+rand = "0.10"
 
 [[bench]]
 name = "hash_keys"

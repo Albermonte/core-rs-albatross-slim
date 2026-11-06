@@ -1,12 +1,13 @@
 use ed25519_zebra::{SigningKey, VerificationKeyBytes};
 use nimiq_utils::key_rng::SecureGenerate;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 #[cfg(feature = "serde-derive")]
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::{Ed25519PublicKey, Ed25519Signature, PrivateKey};
 
-#[derive(Default, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Zeroize)]
 #[cfg_attr(feature = "serde-derive", derive(Serialize, Deserialize))]
 pub struct KeyPair {
     pub private: PrivateKey,
@@ -21,8 +22,8 @@ impl KeyPair {
 }
 
 impl SecureGenerate for KeyPair {
-    fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
-        let zebra_priv_key = SigningKey::new(rand_core_compat::Rng09(rng));
+    fn generate<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+        let zebra_priv_key = SigningKey::new(rng);
         let priv_key = PrivateKey(zebra_priv_key);
         let pub_key = Ed25519PublicKey(VerificationKeyBytes::from(&zebra_priv_key));
         KeyPair {

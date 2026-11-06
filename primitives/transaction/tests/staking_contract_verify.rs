@@ -1,12 +1,18 @@
+mod common;
+
 use std::convert::TryInto;
 
+use common::for_each_protocol_version;
 use nimiq_bls::{
     CompressedPublicKey as BlsPublicKey, KeyPair as BlsKeyPair, SecretKey as BlsSecretKey,
 };
 use nimiq_hash::Blake2bHash;
 use nimiq_keys::{Address, Ed25519PublicKey, KeyPair, PrivateKey};
 use nimiq_primitives::{
-    account::AccountType, coin::Coin, networks::NetworkId, policy::Policy,
+    account::AccountType,
+    coin::Coin,
+    networks::NetworkId,
+    policy::{upgrades, Policy},
     transaction::TransactionError,
 };
 use nimiq_serde::{Deserialize, Serialize, SerializedMaxSize};
@@ -14,7 +20,9 @@ use nimiq_test_log::test;
 use nimiq_test_utils::test_rng;
 use nimiq_transaction::{
     account::{
-        staking_contract::{IncomingStakingTransactionData, OutgoingStakingTransactionData},
+        staking_contract::{
+            IncomingStakingTransactionData, OutgoingStakingTransactionData, SignalDataUpdate,
+        },
         AccountTransactionVerification,
     },
     SignatureProof, Transaction,
@@ -55,10 +63,12 @@ fn it_does_not_support_contract_creation() {
         NetworkId::UnitAlbatross,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::InvalidForRecipient)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidForRecipient)
+        );
+    });
 }
 
 #[test]
@@ -106,22 +116,28 @@ fn create_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
     // Deposit too small or too big.
     tx.value = Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT - 100);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     tx.value = Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT + 100);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Invalid proof of knowledge.
     let other_pair = BlsKeyPair::generate(&mut rng);
@@ -141,10 +157,12 @@ fn create_validator() {
         None,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidData)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidData)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -165,10 +183,12 @@ fn create_validator() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
 }
 
 #[test]
@@ -216,15 +236,19 @@ fn update_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Doing no updates.
     let tx = make_signed_incoming_tx(
@@ -241,10 +265,12 @@ fn update_validator() {
         None,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidData)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidData)
+        );
+    });
 
     // Invalid proof of knowledge.
     let other_pair = BlsKeyPair::generate(&mut rng);
@@ -264,10 +290,12 @@ fn update_validator() {
         None,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidData)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidData)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -290,10 +318,12 @@ fn update_validator() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
 }
 
 #[test]
@@ -324,15 +354,19 @@ fn deactivate_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -347,8 +381,103 @@ fn deactivate_validator() {
         Some(other_pair.public),
     );
 
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
+}
+
+#[test]
+fn set_signal_data() {
+    let mut rng = test_rng(false);
+    let signing_keypair = ed25519_key_pair(VALIDATOR_SIGNING_SECRET_KEY);
+
+    let signal_data = Policy::signal_data_for_version(upgrades::v2::WARM_KEY_SIGNALING);
+
+    let tx = make_signed_incoming_tx(
+        IncomingStakingTransactionData::SetSignalData {
+            validator_address: VALIDATOR_ADDRESS.parse().unwrap(),
+            update: SignalDataUpdate::Full(Some(signal_data.clone())),
+            proof: SignatureProof::default(),
+        },
+        0,
+        &signing_keypair,
+        None,
+    );
+
+    // Rejected before the activation version.
     assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
+        AccountType::verify_incoming_transaction(&tx, 0),
+        Err(TransactionError::InvalidForVersion)
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, upgrades::v2::WARM_KEY_SIGNALING - 1),
+        Err(TransactionError::InvalidForVersion)
+    );
+
+    // Works from the activation version onwards.
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx, upgrades::v2::WARM_KEY_SIGNALING),
+        Ok(())
+    );
+
+    // Clearing the signal data (None) also works.
+    let tx_clear = make_signed_incoming_tx(
+        IncomingStakingTransactionData::SetSignalData {
+            validator_address: VALIDATOR_ADDRESS.parse().unwrap(),
+            update: SignalDataUpdate::Full(None),
+            proof: SignatureProof::default(),
+        },
+        0,
+        &signing_keypair,
+        None,
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx_clear, upgrades::v2::WARM_KEY_SIGNALING),
+        Ok(())
+    );
+
+    // A `Full` update with an all-zero hash is a valid value of the `Option<Blake2bHash>` field
+    // (equivalent to `None` for upgrade signaling), so it is accepted.
+    let tx_zero = make_signed_incoming_tx(
+        IncomingStakingTransactionData::SetSignalData {
+            validator_address: VALIDATOR_ADDRESS.parse().unwrap(),
+            update: SignalDataUpdate::Full(Some(Blake2bHash::default())),
+            proof: SignatureProof::default(),
+        },
+        0,
+        &signing_keypair,
+        None,
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx_zero, upgrades::v2::WARM_KEY_SIGNALING),
+        Ok(())
+    );
+
+    // Signaling transaction with a non-zero value is rejected.
+    let mut tx_value = tx.clone();
+    tx_value.value = Coin::from_u64_unchecked(1);
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx_value, upgrades::v2::WARM_KEY_SIGNALING),
+        Err(TransactionError::InvalidValue)
+    );
+
+    // Invalid signature is rejected.
+    let other_pair = KeyPair::generate(&mut rng);
+    let tx_bad = make_signed_incoming_tx(
+        IncomingStakingTransactionData::SetSignalData {
+            validator_address: VALIDATOR_ADDRESS.parse().unwrap(),
+            update: SignalDataUpdate::Full(Some(signal_data)),
+            proof: SignatureProof::default(),
+        },
+        0,
+        &signing_keypair,
+        Some(other_pair.public),
+    );
+    assert_eq!(
+        AccountType::verify_incoming_transaction(&tx_bad, upgrades::v2::WARM_KEY_SIGNALING),
         Err(TransactionError::InvalidProof)
     );
 }
@@ -381,15 +510,19 @@ fn reactivate_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -404,10 +537,12 @@ fn reactivate_validator() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
 }
 
 #[test]
@@ -437,15 +572,19 @@ fn retire_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -459,10 +598,12 @@ fn retire_validator() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
 }
 
 #[test]
@@ -493,15 +634,18 @@ fn create_staker() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
 
-    // Deposit too small.
+    // Deposit too small (post upgrade restriction).
     tx.value = Coin::from_u64_unchecked(Policy::MINIMUM_STAKE - 1);
-
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue)
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -516,10 +660,48 @@ fn create_staker() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
+}
+
+#[test]
+fn it_rejects_staking_transaction_with_default_signer() {
+    let keypair = ed25519_key_pair(STAKER_PRIVATE_KEY);
+
+    // A correctly signed create-staker transaction is accepted.
+    let tx = make_signed_incoming_tx(
+        IncomingStakingTransactionData::CreateStaker {
+            delegation: None,
+            proof: SignatureProof::default(),
+        },
+        Policy::MINIMUM_STAKE,
+        &keypair,
+        None,
     );
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
+
+    // Replacing the embedded staking proof with the all-zero default proof models the
+    // transaction a malicious block producer would forge to create a staker owned by the
+    // all-zero (wildcard) key. The default proof must be rejected as a signer.
+    let mut forged = tx;
+    forged.recipient_data = IncomingStakingTransactionData::set_signature_on_data(
+        &forged.recipient_data,
+        SignatureProof::default(),
+    )
+    .unwrap();
+
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&forged, v),
+            Err(TransactionError::InvalidProof)
+        );
+    });
 }
 
 #[test]
@@ -527,16 +709,16 @@ fn stake() {
     let keypair = ed25519_key_pair(STAKER_PRIVATE_KEY);
 
     // Test serialization and deserialization.
-    let tx = make_signed_incoming_tx(
+    let mut tx = make_signed_incoming_tx(
         IncomingStakingTransactionData::AddStake {
             staker_address: STAKER_ADDRESS.parse().unwrap(),
         },
-        100,
+        Policy::MINIMUM_STAKE,
         &keypair,
         None,
     );
 
-    let tx_hex = "018c551fabc6e6e00c609c3f0313257ad7e835643c000000000000000000000000000000000000000000010315068c551fabc6e6e00c609c3f0313257ad7e835643c000000000000006400000000000000640000000107006200b3adb13fe6887f6cdcb8c82c429f718fcdbbb27b2a19df7c1ea9814f19cd910500f5d801f531117483118108b30cd606301a424ba63147f3f0a2e085bd655fd15c8eafb971a39883fc9da3711d7ac474cd6047eed7791ec6e00c6ed1a464fddb01";
+    let tx_hex = "018c551fabc6e6e00c609c3f0313257ad7e835643c000000000000000000000000000000000000000000010315068c551fabc6e6e00c609c3f0313257ad7e835643c000000000098968000000000000000640000000107006200b3adb13fe6887f6cdcb8c82c429f718fcdbbb27b2a19df7c1ea9814f19cd910500f6318c0aa54b87dc8da554a2f5cdab566d69d09d5f4b148fe98a547cfb4d2032623a5aa11d3150cb716160f5d1ba87adda0ae203f5659d60490366e8a020f10a";
     let tx_size = 187;
 
     let mut ser_tx: Vec<u8> = Vec::with_capacity(tx_size);
@@ -548,7 +730,18 @@ fn stake() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()));
+    });
+
+    // Deposit as zero (pre upgrade restriction).
+    tx.value = Coin::ZERO;
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::ZeroValue),
+        );
+    });
 }
 
 #[test]
@@ -580,15 +773,19 @@ fn update_staker() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_incoming_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_incoming_transaction(&tx, v), Ok(()),);
+    });
 
     // Signaling transaction with a non-zero value.
     tx.value = Coin::from_u64_unchecked(1);
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidValue),
+        );
+    });
 
     // Invalid signature.
     let other_pair = KeyPair::generate(&mut rng);
@@ -604,10 +801,12 @@ fn update_staker() {
         Some(other_pair.public),
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&tx, v),
+            Err(TransactionError::InvalidProof),
+        );
+    });
 }
 
 #[test]
@@ -627,25 +826,33 @@ fn delete_validator() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case (This assumes the delete_validator_tx function creates a tx with 100 fee)
-    assert_eq!(AccountType::verify_outgoing_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_outgoing_transaction(&tx, v), Ok(()),);
+    });
 
     // This transaction is no longer statically checked for the validator deposit, so the only case where the verification
     // would fail, is by sending a wrong signature
     let tx = make_delete_validator_tx(Policy::VALIDATOR_DEPOSIT - 200, false);
 
-    assert_eq!(AccountType::verify_outgoing_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_outgoing_transaction(&tx, v), Ok(()),);
+    });
 
     let tx = make_delete_validator_tx(Policy::VALIDATOR_DEPOSIT, false);
 
-    assert_eq!(AccountType::verify_outgoing_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_outgoing_transaction(&tx, v), Ok(()),);
+    });
 
     // Wrong signature.
     let tx = make_delete_validator_tx(Policy::VALIDATOR_DEPOSIT - 100, true);
 
-    assert_eq!(
-        AccountType::verify_outgoing_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_outgoing_transaction(&tx, v),
+            Err(TransactionError::InvalidProof),
+        );
+    });
 }
 
 #[test]
@@ -665,15 +872,19 @@ fn remove_stake() {
     assert_eq!(tx, deser_tx);
 
     // Works in the valid case.
-    assert_eq!(AccountType::verify_outgoing_transaction(&tx), Ok(()));
+    for_each_protocol_version(|v| {
+        assert_eq!(AccountType::verify_outgoing_transaction(&tx, v), Ok(()),);
+    });
 
     // Wrong signature.
     let tx = make_remove_stake_tx(true);
 
-    assert_eq!(
-        AccountType::verify_outgoing_transaction(&tx),
-        Err(TransactionError::InvalidProof)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_outgoing_transaction(&tx, v),
+            Err(TransactionError::InvalidProof),
+        );
+    });
 }
 
 #[test]

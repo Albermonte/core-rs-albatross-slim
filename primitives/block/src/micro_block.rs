@@ -131,7 +131,16 @@ impl MicroBlock {
                     vrf_entropy: self.header.seed.entropy(),
                 };
 
-                if !proof.verify(&skip_block, validators) {
+                // From `upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING` on, the proof also commits to
+                // the header `state_root`, so a forged `state_root` invalidates the proof. The header
+                // version cannot be decreased below the predecessor's (checked in
+                // `verify_immediate_successor`), preventing a downgrade to the legacy message.
+                if !proof.verify(
+                    &skip_block,
+                    &self.header.state_root,
+                    self.header.version,
+                    validators,
+                ) {
                     debug!(
                         block = %self,
                         reason = "Bad skip block proof",
@@ -296,7 +305,12 @@ impl MicroBody {
     }
 
     /// Verifies the micro block: size, proofs, transactions, etc.
-    pub(crate) fn verify(&self, is_skip: bool, block_number: u32) -> Result<(), BlockError> {
+    pub(crate) fn verify(
+        &self,
+        is_skip: bool,
+        block_number: u32,
+        version: u16,
+    ) -> Result<(), BlockError> {
         // Check that the maximum body size is not exceeded.
         let body_size = self.serialized_size();
         if body_size > Policy::MAX_SIZE_MICRO_BODY {
@@ -324,7 +338,7 @@ impl MicroBody {
         let mut previous_proof: Option<&EquivocationProof> = None;
         for proof in &self.equivocation_proofs {
             // Check reporting window.
-            if !proof.is_valid_at(block_number) {
+            if !proof.is_valid_at(block_number, version) {
                 return Err(BlockError::InvalidForkProof);
             }
 

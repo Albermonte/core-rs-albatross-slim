@@ -61,8 +61,6 @@ async fn main_inner() -> Result<(), Error> {
     spawn(consensus);
     let consensus = client.consensus_proxy();
 
-    let zkp_component = client.take_zkp_component().unwrap();
-    spawn(zkp_component);
 
     // Create the "monitor" future which never completes to keep the client alive.
     let mut statistics_interval = config_file.log.statistics;

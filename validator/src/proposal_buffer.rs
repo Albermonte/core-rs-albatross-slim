@@ -385,8 +385,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProposalSender<TValidatorNet
         // Fetch current validators.
         let validators = bc.current_validators().unwrap();
 
-        // Make sure the given validator id is not outside of the range of valid validator ids for the current validator set.
-        if proposal.0.signer as usize > validators.num_validators() {
+        // Reject proposals that refer to a nonexistent validator before signature verification.
+        let Some(stated_proposer) = validators.get_validator_by_slot_band(proposal.0.signer) else {
             // The proposal indicates a nonsensical proposer as the validator id is out of bounds.
             // The proposal is dropped and propagation is stopped.
             log::debug!(proposal = ?proposal.0, "Proposal signer does not exist, IOOB");
@@ -396,10 +396,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProposalSender<TValidatorNet
                     MsgAcceptance::Reject,
                 );
             return;
-        }
-
-        // Get the validator whose id was presented in the proposal message.
-        let stated_proposer = validators.get_validator_by_slot_band(proposal.0.signer);
+        };
 
         // Calculate the hash which had been signed.
         let data = TendermintProposal {
@@ -546,6 +543,7 @@ mod test {
     use futures::{FutureExt, StreamExt};
     use nimiq_block::MacroHeader;
     use nimiq_blockchain::Blockchain;
+    use nimiq_blockchain_interface::AbstractBlockchain;
     use nimiq_blockchain_proxy::BlockchainProxy;
     use nimiq_consensus::{
         sync::syncer_proxy::SyncerProxy, BlsCache, Consensus, ConsensusEvent, ConsensusProxy,
@@ -564,7 +562,6 @@ mod test {
     use nimiq_time::{sleep, timeout};
     use nimiq_utils::spawn;
     use nimiq_validator_network::network_impl::ValidatorNetworkImpl;
-    use nimiq_zkp_component::ZKPComponent;
     use parking_lot::{Mutex, RwLock};
     use tokio::select;
 
@@ -577,10 +574,6 @@ mod test {
         net: Arc<N>,
     ) -> Consensus<N> {
         let blockchain_proxy = BlockchainProxy::from(&blockchain);
-
-        let zkp_proxy = ZKPComponent::new(blockchain_proxy.clone(), Arc::clone(&net), None)
-            .await
-            .proxy();
 
         let syncer = SyncerProxy::new_history(
             blockchain_proxy.clone(),
@@ -595,7 +588,6 @@ mod test {
             net,
             syncer,
             0,
-            zkp_proxy,
             Arc::new(AtomicU32::new(0)),
         )
     }
@@ -681,6 +673,7 @@ mod test {
         nw2: Arc<MockNetwork>,
         signing_key: SchnorrKeyPair,
         macro_header: MacroHeader,
+        signer: u16,
     ) -> ProposalAndPubsubId<ValidatorNetworkImpl<MockNetwork>> {
         // Create the proposal message which chain 2 will receive.
         let proposal_message: ProposalMessage<Header<MacroHeader>> = ProposalMessage {
@@ -699,7 +692,7 @@ mod test {
 
         let signed_message = SignedProposalMessage {
             message: proposal_message,
-            signature: (signing_key.sign(&data), 0),
+            signature: (signing_key.sign(&data), signer),
         };
 
         // Send the proposal over gossipsub to get it correctly filled with a pubsub_id
@@ -746,6 +739,7 @@ mod test {
             nw2,
             signing_key,
             macro_block.unwrap_macro_ref().header.clone(),
+            0,
         )
         .await;
 
@@ -795,6 +789,7 @@ mod test {
             nw2,
             signing_key,
             macro_block.unwrap_macro_ref().header.clone(),
+            0,
         )
         .await;
 
@@ -859,6 +854,7 @@ mod test {
             nw2,
             signing_key,
             macro_block.unwrap_macro_ref().header.clone(),
+            0,
         )
         .await;
 
@@ -926,6 +922,7 @@ mod test {
             nw2,
             signing_key,
             macro_block.unwrap_macro_ref().header.clone(),
+            0,
         )
         .await;
 
@@ -950,5 +947,65 @@ mod test {
         producer2
             .push(macro_block)
             .expect("pushing the macro block must work");
+    }
+
+    #[test(tokio::test)]
+    async fn it_rejects_proposals_with_nonexistent_signers() {
+        let (consensus_proxy, producer1, producer2, nw1, nw2, signing_key) = setup().await;
+
+        // Push blocks until before the macro block so both chains agree on the current validator set.
+        for _ in 0..Policy::blocks_per_batch() - 1 {
+            let block = producer1.next_block(vec![], false);
+            producer2.push(block).expect("Pushing blocks must succeed");
+        }
+
+        let macro_block = producer1.next_block(vec![], false);
+        let invalid_signer = producer2
+            .blockchain
+            .read()
+            .current_validators()
+            .expect("validators must exist")
+            .num_validators() as u16;
+
+        let (proposal_sender, mut proposal_receiver) = ProposalBuffer::new(
+            Arc::clone(&producer2.blockchain),
+            Arc::new(ValidatorNetworkImpl::new(Arc::clone(&nw2))),
+            consensus_proxy,
+        );
+
+        let proposal = create_proposal_msg(
+            nw1,
+            nw2,
+            signing_key,
+            macro_block.unwrap_macro_ref().header.clone(),
+            invalid_signer,
+        )
+        .await;
+
+        proposal_sender.send(proposal);
+
+        let shared = proposal_sender.shared.lock();
+        assert!(
+            shared.buffer.is_empty(),
+            "invalid signer must not be inserted into the proposal buffer",
+        );
+        assert!(
+            shared.resolve_block_futures.is_empty(),
+            "invalid signer must not enqueue predecessor resolution",
+        );
+        assert!(
+            shared.peers_with_resolving_blocks.is_empty(),
+            "invalid signer must not register a peer for block resolution",
+        );
+        assert!(
+            shared.unresolved_disconnect_futures.is_empty(),
+            "invalid signer rejection should not enqueue disconnect work before buffer admission",
+        );
+        drop(shared);
+
+        assert!(
+            proposal_receiver.next().now_or_never().is_none(),
+            "proposal with signer == num_validators() must not be yielded by the receiver",
+        );
     }
 }

@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Tools for building a Nimiq genesis"
 homepage.workspace = true
 repository.workspace = true
@@ -19,7 +20,7 @@ log = { workspace = true }
 serde = "1.0"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
-toml = "0.9"
+toml = "1.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 nimiq-account = { workspace = true, features = ["accounts", "interaction-traits"] }
@@ -32,4 +33,8 @@ nimiq-primitives = { workspace = true, features = ["serde-derive", "slots", "tre
 nimiq-serde = { workspace = true }
 nimiq-transaction = { workspace = true }
 nimiq-trie = { workspace = true }
+nimiq-utils = { workspace = true }
 nimiq-vrf = { workspace = true, features = ["serde-derive"] }
+
+[dev-dependencies]
+nimiq-test-log = { workspace = true }

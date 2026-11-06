@@ -91,6 +91,15 @@ pub enum Error {
 
     #[error("Received update with too many peer contacts: {num_peer_contacts}")]
     UpdateLimitExceeded { num_peer_contacts: usize },
+
+    #[error("Received duplicate inbound discovery substream on the same connection")]
+    DuplicateInboundSubstream,
+
+    #[error("Received duplicate outbound discovery substream on the same connection")]
+    DuplicateOutboundSubstream,
+
+    #[error("Received outbound discovery substream in unexpected state: {state:?}")]
+    UnexpectedOutboundSubstream { state: HandlerState },
 }
 
 impl Error {
@@ -173,6 +182,7 @@ pub struct Handler {
 
 impl Handler {
     const STATE_TRANSITION_TIMEOUT: Duration = Duration::from_millis(3000);
+    const MAX_SEND_UPDATE_INTERVAL: Duration = Duration::from_secs(3600);
     pub fn new(
         peer_id: PeerId,
         config: Config,
@@ -231,7 +241,7 @@ impl Handler {
     ) -> Vec<SignedPeerContact> {
         peer_contact_book
             .query(self.services_filter)
-            .choose_multiple(&mut rand::rng(), limit)
+            .sample(&mut rand::rng(), limit)
             .into_iter()
             .map(|c| c.signed().clone())
             .collect()
@@ -265,6 +275,17 @@ impl Handler {
             .push_back(ConnectionHandlerEvent::ReportRemoteProtocols(
                 ProtocolSupport::Added(stream_protocols),
             ));
+    }
+
+    fn fail_closed(&mut self, error: Error) {
+        warn!(peer_id = %self.peer_id, %error, "Closing discovery connection");
+        self.events
+            .push_back(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerOutEvent::Error(error),
+            ));
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
     }
 }
 
@@ -306,7 +327,8 @@ impl ConnectionHandler for Handler {
                 protocol, ..
             }) => {
                 if self.inbound.is_some() {
-                    panic!("Inbound already connected");
+                    self.fail_closed(Error::DuplicateInboundSubstream);
+                    return;
                 }
                 self.inbound = Some(protocol);
                 self.check_initialized();
@@ -316,10 +338,12 @@ impl ConnectionHandler for Handler {
                 protocol, ..
             }) => {
                 if self.outbound.is_some() {
-                    panic!("Outbound already connected");
+                    self.fail_closed(Error::DuplicateOutboundSubstream);
+                    return;
                 }
                 if self.state != HandlerState::OpenSubstream {
-                    panic!("Unexpected outbound");
+                    self.fail_closed(Error::UnexpectedOutboundSubstream { state: self.state });
+                    return;
                 }
                 self.outbound = Some(protocol);
                 self.check_initialized();
@@ -443,8 +467,9 @@ impl ConnectionHandler for Handler {
                                     let response_signature =
                                         self.keypair.tagged_sign(&challenge_nonce);
 
-                                    // Remember peer's filter
-                                    self.peer_list_limit = Some(limit);
+                                    // Remember peer's filter, clamping to our own update limit
+                                    self.peer_list_limit =
+                                        Some(limit.min(self.config.update_limit));
                                     self.services_filter = services;
 
                                     let peer_contact_book = self.peer_contact_book.read();
@@ -599,8 +624,11 @@ impl ConnectionHandler for Handler {
                                     if let Some(mut update_interval) = update_interval {
                                         let min_secs =
                                             self.config.min_send_update_interval.as_secs();
+                                        let max_secs = Self::MAX_SEND_UPDATE_INTERVAL.as_secs();
                                         if update_interval < min_secs {
                                             update_interval = min_secs;
+                                        } else if update_interval > max_secs {
+                                            update_interval = max_secs;
                                         }
                                         self.periodic_update_interval =
                                             Some(interval(Duration::from_secs(update_interval)));
@@ -724,7 +752,10 @@ impl ConnectionHandler for Handler {
                                 HandlerOutEvent::Error(e.into()),
                             ))
                         }
-                        Poll::Pending => {}
+                        Poll::Pending => {
+                            // Is okay here not to break as after this the timer must also be checked.
+                            // Special care needs to be taken in case the timer does not exist.
+                        }
                     }
 
                     // Periodically send out updates.
@@ -735,7 +766,7 @@ impl ConnectionHandler for Handler {
                                     let peer_contact_book = &self.peer_contact_book.read();
                                     let mut peer_contacts = self.get_peer_contacts(
                                         peer_contact_book,
-                                        self.peer_list_limit.unwrap() as usize - 1,
+                                        (self.peer_list_limit.unwrap() as usize).saturating_sub(1),
                                     );
                                     // Always include our own contact for updates
                                     peer_contacts
@@ -758,6 +789,16 @@ impl ConnectionHandler for Handler {
                             Poll::Ready(None) => unreachable!("Interval terminated"),
                             Poll::Pending => break,
                         }
+                    } else {
+                        // All other paths but Poll::Pending in the previous .receive() have returned,
+                        // meaning that receive has returned Pending.
+                        // Since there is nothing new to poll here, this must break.
+                        debug!(
+                            %self.peer_id,
+                            %self.peer_address,
+                            "Timer does not exist for this peer",
+                        );
+                        break;
                     }
                 }
             }

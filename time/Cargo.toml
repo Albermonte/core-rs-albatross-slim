@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "tokio::time for Rust and WASM"
 homepage.workspace = true
 repository.workspace = true
@@ -15,9 +16,11 @@ workspace = true
 
 [dependencies]
 futures = { workspace = true }
-gloo-timers = { version = "0.3", features = ["futures"] }
+# Patched locally. See issue nimiq/core-rs-albatross#3844 and ranile/gloo#570.
+# Currently vendored via `patches/gloo-timers`; remove once the fix is upstream.
+gloo-timers = { version = "0.4", features = ["futures"] }
 instant = { version = "0.1", features = ["wasm-bindgen"] }
-pin-project-lite = "0.2.16"
+pin-project-lite = "0.2.17"
 send_wrapper = { version = "0.6", features = ["futures"] }
-tokio = { version = "1.49", features = ["time"] }
+tokio = { version = "1.52", features = ["time"] }
 tokio-stream = { version = "0.1", features = ["time"] }

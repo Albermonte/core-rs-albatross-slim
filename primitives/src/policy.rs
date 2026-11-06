@@ -7,11 +7,23 @@ use once_cell::sync::OnceCell;
 #[cfg(feature = "ts-types")]
 use wasm_bindgen::prelude::*;
 
+use crate::networks::NetworkId;
+
+pub mod upgrades;
+
 /// Global policy
 static GLOBAL_POLICY: OnceCell<Policy> = OnceCell::new();
 
+/// The thread (under libtest: the test) whose read installed the default policy.
+static LAZY_DEFAULT_BY: OnceCell<String> = OnceCell::new();
+
+fn lazy_default() -> Policy {
+    let _ = LAZY_DEFAULT_BY.set(std::thread::current().name().unwrap_or("?").to_owned());
+    Policy::default()
+}
+
 /// Policy constants
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts-types", cfg_eval::cfg_eval, wasm_bindgen)]
 pub struct Policy {
     /// Length of a batch including the macro block
@@ -29,7 +41,9 @@ pub struct Policy {
     /// Genesis block number
     #[cfg_attr(feature = "ts-types", wasm_bindgen(skip))]
     pub genesis_block_number: u32,
-    /// Maximum supported version
+    /// Maximum supported protocol version.
+    // This should only be increased when a new hard fork code is released.
+    // VERY IMPORTANT: This should be changed accordingly in `NetworkInfo`.
     #[cfg_attr(feature = "ts-types", wasm_bindgen(skip))]
     pub max_supported_version: u16,
 }
@@ -162,6 +176,28 @@ impl Policy {
     /// A value of `80` means 80% of the stake needs to support the upgrade.
     pub const UPGRADE_MIN_SUPPORT: u64 = 80;
 
+    /// Builds the canonical `signal_data` value that signals support for the given protocol
+    /// `version`. The version is encoded in the first two bytes (big-endian), the rest is zero.
+    /// This is the inverse of the check performed by [`Policy::supports_upgrade`].
+    pub fn signal_data_for_version(version: u16) -> Blake2bHash {
+        let mut signal_data = [0u8; 32];
+        signal_data[..2].copy_from_slice(&version.to_be_bytes());
+        Blake2bHash(signal_data)
+    }
+
+    /// Applies a protocol-version update to an existing `signal_data` value: `version` is encoded
+    /// into the first two bytes (big-endian) while the remaining bytes are preserved. This is a
+    /// partial update, so it always yields a present value (clearing the whole field is a separate
+    /// operation). `version == 0` zeroes the version bytes. An all-zero result and a `None` signal
+    /// data are equivalent for upgrade signaling at every real version (>= 2) — both make
+    /// [`Policy::supports_upgrade`] return `false`; they differ only at version 0.
+    /// This is the partial-update counterpart to [`Policy::signal_data_for_version`].
+    pub fn signal_data_with_version(current: Option<Blake2bHash>, version: u16) -> Blake2bHash {
+        let mut bytes: [u8; 32] = current.map(Into::into).unwrap_or([0u8; 32]);
+        bytes[..2].copy_from_slice(&version.to_be_bytes());
+        Blake2bHash(bytes)
+    }
+
     /// This function is used to determine if a validator signalled for a specific upgrade.
     /// This is checking the first two bytes of the signal data.
     /// However, the check could also be version specific in the future.
@@ -181,9 +217,41 @@ impl Policy {
         self.blocks_per_batch * self.batches_per_epoch as u32
     }
 
+    /// Installs `policy` as the process-wide policy unless one is installed already, and returns
+    /// the installed one. The policy can only be installed once per process, so in debug builds
+    /// a second, different policy is an error rather than a silent no-op.
     #[inline]
     pub fn get_or_init(policy: Policy) -> Policy {
-        *GLOBAL_POLICY.get_or_init(|| policy)
+        let installed = *GLOBAL_POLICY.get_or_init(|| policy);
+        debug_assert_eq!(
+            installed,
+            policy,
+            "a different policy is already installed for this process{}",
+            LAZY_DEFAULT_BY
+                .get()
+                .map(|by| format!(" (the default policy, first read by `{by}`)"))
+                .unwrap_or_default()
+        );
+        installed
+    }
+
+    /// Returns the default policy parameters for the given network.
+    ///
+    /// Note that the `genesis_block_number` and `max_supported_version` fields are taken from
+    /// the corresponding policy constant here, but callers are expected to override them with
+    /// the authoritative values from the network's genesis configuration (see
+    /// [`crate::networks::NetworkId`] / `NetworkInfo`) before installing the policy via
+    /// [`Policy::get_or_init`].
+    pub fn default_for_network(network_id: NetworkId) -> Policy {
+        match network_id {
+            NetworkId::MainAlbatross => MAINNET_POLICY,
+            NetworkId::TestAlbatross => TESTNET_POLICY,
+            // Dev shares the test network parameters; its genesis is supplied by `NetworkInfo`.
+            NetworkId::DevAlbatross => TESTNET_POLICY,
+            NetworkId::UnitAlbatross => TEST_POLICY,
+            // Non-Albatross networks are not supported; fall back to mainnet parameters.
+            _ => MAINNET_POLICY,
+        }
     }
 }
 
@@ -193,7 +261,7 @@ impl Policy {
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = TRANSACTION_VALIDITY_WINDOW))]
     pub fn transaction_validity_window() -> u32 {
-        let policy = GLOBAL_POLICY.get_or_init(Self::default);
+        let policy = GLOBAL_POLICY.get_or_init(lazy_default);
         assert!(policy.batches_per_epoch as u32 >= policy.transaction_validity_window);
         policy.transaction_validity_window
     }
@@ -202,24 +270,24 @@ impl Policy {
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = TRANSACTION_VALIDITY_WINDOW_BLOCKS))]
     pub fn transaction_validity_window_blocks() -> u32 {
-        let policy = GLOBAL_POLICY.get_or_init(Self::default);
+        let policy = GLOBAL_POLICY.get_or_init(lazy_default);
         assert!(policy.batches_per_epoch as u32 >= policy.transaction_validity_window);
         policy.transaction_validity_window
-            * GLOBAL_POLICY.get_or_init(Self::default).blocks_per_batch
+            * GLOBAL_POLICY.get_or_init(lazy_default).blocks_per_batch
     }
 
     /// How many batches constitute an epoch
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = BATCHES_PER_EPOCH))]
     pub fn batches_per_epoch() -> u16 {
-        GLOBAL_POLICY.get_or_init(Self::default).batches_per_epoch
+        GLOBAL_POLICY.get_or_init(lazy_default).batches_per_epoch
     }
 
     /// Length of a batch including the macro block
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = BLOCKS_PER_BATCH))]
     pub fn blocks_per_batch() -> u32 {
-        GLOBAL_POLICY.get_or_init(Self::default).blocks_per_batch
+        GLOBAL_POLICY.get_or_init(lazy_default).blocks_per_batch
     }
 
     /// Length of an epoch including the election block
@@ -227,7 +295,7 @@ impl Policy {
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = BLOCKS_PER_EPOCH))]
     pub fn blocks_per_epoch() -> u32 {
         GLOBAL_POLICY
-            .get_or_init(Self::default)
+            .get_or_init(lazy_default)
             .get_blocks_per_epoch()
     }
 
@@ -235,17 +303,15 @@ impl Policy {
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = GENESIS_BLOCK_NUMBER))]
     pub fn genesis_block_number() -> u32 {
-        GLOBAL_POLICY
-            .get_or_init(Self::default)
-            .genesis_block_number
+        GLOBAL_POLICY.get_or_init(lazy_default).genesis_block_number
     }
 
-    /// Genesis block number
+    /// Maximum supported protocol version
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = MAX_SUPPORTED_VERSION))]
     pub fn max_supported_version() -> u16 {
         GLOBAL_POLICY
-            .get_or_init(Self::default)
+            .get_or_init(lazy_default)
             .max_supported_version
     }
 
@@ -254,7 +320,7 @@ impl Policy {
     #[cfg_attr(feature = "ts-types", wasm_bindgen(getter = STATE_CHUNKS_MAX_SIZE))]
     pub fn state_chunks_max_size() -> u32 {
         GLOBAL_POLICY
-            .get_or_init(Policy::default)
+            .get_or_init(lazy_default)
             .state_chunks_max_size
     }
 
@@ -326,8 +392,9 @@ impl Policy {
         } else {
             let blocks_per_epoch = Self::blocks_per_epoch();
             let block_number = block_number - Self::genesis_block_number();
-            ((block_number / blocks_per_epoch + 1) * blocks_per_epoch)
-                + Self::genesis_block_number()
+            (block_number / blocks_per_epoch + 1)
+                .saturating_mul(blocks_per_epoch)
+                .saturating_add(Self::genesis_block_number())
         }
     }
 
@@ -386,8 +453,9 @@ impl Policy {
         } else {
             let block_number = block_number - Self::genesis_block_number();
             let blocks_per_batch = Self::blocks_per_batch();
-            ((block_number / blocks_per_batch + 1) * blocks_per_batch)
-                + Self::genesis_block_number()
+            (block_number / blocks_per_batch + 1)
+                .saturating_mul(blocks_per_batch)
+                .saturating_add(Self::genesis_block_number())
         }
     }
 
@@ -494,26 +562,72 @@ impl Policy {
         Self::epoch_index_at(block_number) < Self::blocks_per_batch()
     }
 
-    /// Returns the block height for the last block of the reporting window of a given block number.
-    /// Note: This window is meant for reporting malicious behaviour (aka `jailable` behaviour).
+    /// Returns the last block height of the collateral lock-up window of a given block number.
+    ///
+    /// This governs the collateral lock-up: a deactivated validator's funds (and its stakers')
+    /// stay locked until this block so they remain slashable while offenses could still be reported.
+    /// It is kept at one epoch and must always be `>=` the equivocation reporting window
+    /// (`last_block_of_equivocation_reporting_window`), so collateral is always present while an
+    /// offense is still reportable.
     #[inline]
-    #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = lastBlockOfReportingWindow))]
-    pub fn last_block_of_reporting_window(block_number: u32) -> u32 {
-        block_number + Self::blocks_per_epoch()
+    #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = lastBlockOfCollateralLockup))]
+    pub fn last_block_of_collateral_lockup(block_number: u32) -> u32 {
+        block_number.saturating_add(Self::blocks_per_epoch())
     }
 
-    /// Returns the first block after the reporting window of a given block number has ended.
+    /// Returns the first block after the collateral lock-up window of a given block number has ended.
     #[inline]
+    #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = blockAfterCollateralLockup))]
+    pub fn block_after_collateral_lockup(block_number: u32) -> u32 {
+        Self::last_block_of_collateral_lockup(block_number).saturating_add(1)
+    }
+
+    /// @deprecated Renamed to `lastBlockOfCollateralLockup`. This window never governed
+    /// equivocation *reporting* (that is `lastBlockOfEquivocationReportingWindow`); it has always
+    /// been the collateral lock-up window. Kept for API backwards compatibility.
+    #[inline]
+    #[deprecated(since = "2.0.0", note = "renamed to `last_block_of_collateral_lockup`")]
+    // The generated wasm shim calls this deprecated function; callers still get the warning
+    #[cfg_attr(feature = "ts-types", allow(deprecated))]
+    #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = lastBlockOfReportingWindow))]
+    pub fn last_block_of_reporting_window(block_number: u32) -> u32 {
+        Self::last_block_of_collateral_lockup(block_number)
+    }
+
+    /// @deprecated Renamed to `blockAfterCollateralLockup`. Kept for API backwards compatibility;
+    /// see `lastBlockOfCollateralLockup`.
+    #[inline]
+    #[deprecated(since = "2.0.0", note = "renamed to `block_after_collateral_lockup`")]
+    // The generated wasm shim calls this deprecated function; callers still get the warning
+    #[cfg_attr(feature = "ts-types", allow(deprecated))]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = blockAfterReportingWindow))]
     pub fn block_after_reporting_window(block_number: u32) -> u32 {
-        Self::last_block_of_reporting_window(block_number) + 1
+        Self::block_after_collateral_lockup(block_number)
+    }
+
+    /// Returns the last block height at which an equivocation that happened at `block_number` can
+    /// still be reported (i.e. included in a block via an equivocation proof).
+    ///
+    /// This is intentionally bounded by the transaction validity window so it stays within the
+    /// validity-store dedup retention (`transaction_validity_window_blocks + blocks_per_batch`).
+    /// Equivocation proofs are deduplicated against the validity store; if this window were longer,
+    /// a genuine proof could be re-included after the dedup forgot it, re-jailing the validator and
+    /// re-burning rewards. The collateral lock-up (`last_block_of_collateral_lockup`) is kept
+    /// longer (one epoch) and must always be `>=` this window. See the invariant test
+    /// `reporting_window_stays_within_dedup_retention`.
+    #[inline]
+    #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = lastBlockOfEquivocationReportingWindow))]
+    pub fn last_block_of_equivocation_reporting_window(block_number: u32) -> u32 {
+        block_number.saturating_add(Self::transaction_validity_window_blocks())
     }
 
     /// Returns the first block after the jail period of a given block number has ended.
     #[inline]
     #[cfg_attr(feature = "ts-types", wasm_bindgen(js_name = blockAfterJail))]
     pub fn block_after_jail(block_number: u32) -> u32 {
-        block_number + Self::blocks_per_epoch() * Self::JAIL_EPOCHS + 1
+        block_number
+            .saturating_add(Self::blocks_per_epoch().saturating_mul(Self::JAIL_EPOCHS))
+            .saturating_add(1)
     }
 
     /// Returns the supply at a given time (as Unix time) in Lunas (1 NIM = 100,000 Lunas). It is
@@ -679,7 +793,9 @@ pub const MAINNET_POLICY: Policy = Policy {
     transaction_validity_window: 120,
     // As defined in the `main` network genesis file
     genesis_block_number: 3456000,
-    max_supported_version: 1,
+    // This should only be increased when a new hard fork code is released.
+    // VERY IMPORTANT: This should be changed accordingly in `NetworkInfo`.
+    max_supported_version: 2,
 };
 
 /// Policy constants for TestNet
@@ -690,7 +806,9 @@ pub const TESTNET_POLICY: Policy = Policy {
     transaction_validity_window: 120,
     // As defined in the `test` network genesis file
     genesis_block_number: 3032010,
-    max_supported_version: 1,
+    // This should only be increased when a new hard fork code is released.
+    // VERY IMPORTANT: This should be changed accordingly in `NetworkInfo`.
+    max_supported_version: 2,
 };
 
 /// Policy constants used for testing purposes
@@ -701,7 +819,9 @@ pub const TEST_POLICY: Policy = Policy {
     transaction_validity_window: 2,
     // This number should match the one that is defined in the `unit` network genesis file which is the genesis used for unit testing
     genesis_block_number: 200,
-    max_supported_version: 2,
+    // This should only be increased when a new hard fork code is released.
+    // VERY IMPORTANT: This should be changed accordingly in `NetworkInfo`.
+    max_supported_version: 5,
 };
 
 #[cfg(test)]
@@ -712,6 +832,53 @@ mod tests {
 
     fn initialize_policy() {
         let _ = Policy::get_or_init(TEST_POLICY);
+    }
+
+    #[test]
+    fn signal_data_with_version_is_a_partial_update() {
+        use nimiq_hash::Blake2bHash;
+
+        // Setting a version on empty signal data encodes it in the first two bytes and matches
+        // the canonical encoding.
+        let v2 = Policy::signal_data_with_version(None, 2);
+        assert_eq!(&v2.as_slice()[..2], &2u16.to_be_bytes());
+        assert!(v2.as_slice()[2..].iter().all(|&b| b == 0));
+        assert!(Policy::supports_upgrade(Some(v2), 2));
+        assert_eq!(
+            Policy::signal_data_with_version(None, 2),
+            Policy::signal_data_for_version(2)
+        );
+
+        // Updating the version preserves the remaining bytes (non-destructive partial update).
+        let mut bytes = [0u8; 32];
+        bytes[5] = 0xAB;
+        let updated = Policy::signal_data_with_version(Some(Blake2bHash(bytes)), 7);
+        assert_eq!(&updated.as_slice()[..2], &7u16.to_be_bytes());
+        assert_eq!(updated.as_slice()[5], 0xAB);
+        assert!(Policy::supports_upgrade(Some(updated), 7));
+
+        // Zeroing the version (version 0) zeroes only the version bytes, preserving the rest.
+        let mut bytes = [0u8; 32];
+        bytes[..2].copy_from_slice(&9u16.to_be_bytes());
+        bytes[5] = 0xAB;
+        let cleared = Policy::signal_data_with_version(Some(Blake2bHash(bytes)), 0);
+        assert_eq!(&cleared.as_slice()[..2], &[0u8, 0u8]);
+        assert_eq!(cleared.as_slice()[5], 0xAB);
+
+        // A version update always yields a present value — it never clears the field to `None`.
+        // An all-zero result is a valid value, equivalent to `None` for upgrade signaling.
+        assert_eq!(
+            Policy::signal_data_with_version(Some(Policy::signal_data_for_version(3)), 0),
+            Blake2bHash::default()
+        );
+        assert_eq!(
+            Policy::signal_data_with_version(None, 0),
+            Blake2bHash::default()
+        );
+        assert!(!Policy::supports_upgrade(
+            Some(Policy::signal_data_with_version(None, 0)),
+            2
+        ));
     }
 
     #[test]
@@ -762,6 +929,26 @@ mod tests {
         assert_eq!(
             Policy::batch_at(Policy::blocks_per_batch() + Policy::genesis_block_number() + 1),
             2
+        );
+    }
+
+    /// Invariant: the equivocation reporting window must stay within the validity-store dedup
+    /// retention (`transaction_validity_window_blocks + blocks_per_batch`). If the reporting window
+    /// were longer, a genuine equivocation proof could be re-included after the dedup store forgot
+    /// it, re-jailing the validator and re-burning rewards. Keep this satisfied if the reporting
+    /// window definition is ever changed.
+    #[test]
+    fn reporting_window_stays_within_dedup_retention() {
+        initialize_policy();
+        let block_number = Policy::genesis_block_number();
+        let reporting_window =
+            Policy::last_block_of_equivocation_reporting_window(block_number) - block_number;
+        let dedup_retention =
+            Policy::transaction_validity_window_blocks() + Policy::blocks_per_batch();
+        assert!(
+            reporting_window <= dedup_retention,
+            "equivocation reporting window ({reporting_window}) must be <= validity-store dedup \
+             retention ({dedup_retention}); a longer window would allow aged-proof replay"
         );
     }
 

@@ -1,15 +1,18 @@
 use std::fmt::Debug;
 
-use nimiq_bls::AggregatePublicKey;
+use nimiq_bls::{AggregatePublicKey, SigHash};
+use nimiq_hash::Blake2bHash;
 use nimiq_hash_derive::SerializeContent;
 use nimiq_primitives::{
-    networks::NetworkId, policy::Policy, slots_allocation::Validators, Message, SignedMessage,
-    PREFIX_SKIP_BLOCK_INFO,
+    networks::NetworkId,
+    policy::{upgrades, Policy},
+    slots_allocation::Validators,
+    Message, SignedMessage, PREFIX_SKIP_BLOCK_INFO, PREFIX_SKIP_BLOCK_WITH_STATE_ROOT_INFO,
 };
 use nimiq_serde::{Deserialize, Serialize, SerializedMaxSize};
 use nimiq_vrf::VrfEntropy;
 
-use crate::{MicroBlock, MultiSignature};
+use crate::{multisig::checked_signer_slots, MicroBlock, MultiSignature};
 
 pub type SignedSkipBlockInfo = SignedMessage<SkipBlockInfo>;
 
@@ -43,10 +46,45 @@ impl SkipBlockInfo {
             None
         }
     }
+
+    /// Computes the message hash that the validators sign when attesting to a skip block.
+    ///
+    /// From `upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING` onwards the signed message is a
+    /// [`SkipBlockWithStateRootInfo`], which additionally commits to the skip block's
+    /// `state_root`. This binds the otherwise unauthenticated header commitment to the aggregate
+    /// proof, so a valid proof can no longer be replayed onto a header carrying a forged
+    /// `state_root`. For earlier protocol versions the legacy hash (over the reduced
+    /// `SkipBlockInfo` only) is returned unchanged, keeping historical proofs verifiable.
+    pub fn signing_hash(&self, state_root: &Blake2bHash, protocol_version: u16) -> SigHash {
+        if protocol_version < upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING {
+            self.hash_with_prefix()
+        } else {
+            SkipBlockWithStateRootInfo {
+                info: self.clone(),
+                state_root: state_root.clone(),
+            }
+            .hash_with_prefix()
+        }
+    }
 }
 
 impl Message for SkipBlockInfo {
     const PREFIX: u8 = PREFIX_SKIP_BLOCK_INFO;
+}
+
+/// The skip block message that validators sign from
+/// `upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING` on: the reduced [`SkipBlockInfo`] together with
+/// the deterministic `state_root` the skip block commits to. Signing this as its own prefixed
+/// [`Message`] (instead of re-hashing the `SkipBlockInfo` hash with the `state_root` appended)
+/// keeps the domain separation between validator-signed messages explicit.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, SerializeContent)]
+pub struct SkipBlockWithStateRootInfo {
+    pub info: SkipBlockInfo,
+    pub state_root: Blake2bHash,
+}
+
+impl Message for SkipBlockWithStateRootInfo {
+    const PREFIX: u8 = PREFIX_SKIP_BLOCK_WITH_STATE_ROOT_INFO;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize)]
@@ -58,9 +96,29 @@ pub struct SkipBlockProof {
 impl SkipBlockProof {
     /// Verifies the proof. This only checks that the proof is valid for this skip block, not that
     /// the skip block itself is valid.
-    pub fn verify(&self, skip_block: &SkipBlockInfo, validators: &Validators) -> bool {
+    ///
+    /// `state_root` and `protocol_version` are those of the block the proof is attached to. From
+    /// `upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING` onwards the `state_root` is part of the
+    /// signed message (see [`SkipBlockInfo::signing_hash`]).
+    pub fn verify(
+        &self,
+        skip_block: &SkipBlockInfo,
+        state_root: &Blake2bHash,
+        protocol_version: u16,
+        validators: &Validators,
+    ) -> bool {
+        let signer_slots = match checked_signer_slots(&self.sig.signers) {
+            Some(slots) => slots,
+            None => {
+                error!(
+                    "SkipBlockProof verification failed: signer set contains out-of-range slots."
+                );
+                return false;
+            }
+        };
+
         // Check if there are enough votes.
-        if self.sig.signers.len() < Policy::TWO_F_PLUS_ONE as usize {
+        if signer_slots.len() < Policy::TWO_F_PLUS_ONE as usize {
             error!(
                 "SkipBlockProof verification failed: Not enough slots signed the skip block message."
             );
@@ -69,21 +127,22 @@ impl SkipBlockProof {
 
         // Get the public key for each SLOT present in the signature and add them together to get
         // the aggregated public key.
-        let agg_pk =
-            self.sig
-                .signers
-                .iter()
-                .fold(AggregatePublicKey::new(), |mut aggregate, slot| {
-                    let pk = validators
-                        .get_validator_by_slot_number(slot as u16)
-                        .voting_key
-                        .uncompress()
-                        .expect("Failed to uncompress CompressedPublicKey");
-                    aggregate.aggregate(pk);
-                    aggregate
-                });
+        let mut agg_pk = AggregatePublicKey::new();
+        for slot in signer_slots {
+            let Some(pk) = validators
+                .get_validator_by_slot_number(slot)
+                .voting_key
+                .uncompress()
+            else {
+                return false;
+            };
+            agg_pk.aggregate(pk);
+        }
 
         // Verify the aggregated signature against our aggregated public key.
-        agg_pk.verify_hash(skip_block.hash_with_prefix(), &self.sig.signature)
+        agg_pk.verify_hash(
+            skip_block.signing_hash(state_root, protocol_version),
+            &self.sig.signature,
+        )
     }
 }

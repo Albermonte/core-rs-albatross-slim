@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, hash::Hasher, io, mem, ops::Range};
 
-use nimiq_bls::{AggregatePublicKey, AggregateSignature};
+use nimiq_bls::{AggregatePublicKey, AggregateSignature, CompressedSignature};
 use nimiq_collections::BitSet;
 use nimiq_hash::{Blake2bHash, Blake2sHash, Hash as _, HashOutput, SerializeContent};
 use nimiq_keys::{
@@ -8,7 +8,7 @@ use nimiq_keys::{
 };
 use nimiq_primitives::{
     networks::NetworkId,
-    policy::Policy,
+    policy::{upgrades, Policy},
     slots_allocation::{Validator, Validators},
     TendermintIdentifier, TendermintProposal, TendermintStep, TendermintVote,
 };
@@ -18,7 +18,7 @@ use nimiq_transaction::{
 };
 use thiserror::Error;
 
-use crate::{MacroHeader, MicroHeader};
+use crate::{multisig::checked_signer_slots, MacroHeader, MicroHeader};
 
 /// An equivocation proof proves that a validator misbehaved.
 ///
@@ -38,6 +38,15 @@ fn get_validator<'a>(
     validators
         .get_validator_by_address(address)
         .ok_or(EquivocationProofError::InvalidValidatorAddress)
+}
+
+fn uncompress_signature(
+    signature: &CompressedSignature,
+) -> Result<AggregateSignature, EquivocationProofError> {
+    signature
+        .uncompress()
+        .map(AggregateSignature)
+        .map_err(|_| EquivocationProofError::InvalidJustification)
 }
 
 impl EquivocationProof {
@@ -121,10 +130,21 @@ impl EquivocationProof {
         }
     }
 
-    /// Check if an equivocation proof is valid at a given block height. Equivocation proofs are
-    /// valid only until the end of the reporting window.
-    pub fn is_valid_at(&self, block_number: u32) -> bool {
-        block_number <= Policy::last_block_of_reporting_window(self.block_number())
+    /// Check if an equivocation proof is valid at a given block height, given the protocol
+    /// `version` of the reporting block. From `upgrades::v2::EQUIVOCATION_REPORTING_WINDOW` onward
+    /// proofs are valid only until the end of the equivocation reporting window (bounded by the
+    /// transaction validity window) so a proof can never be re-included after it has aged out of the
+    /// validity-store dedup; before that version the legacy one-epoch window applies.
+    pub fn is_valid_at(&self, block_number: u32, version: u16) -> bool {
+        // From the v2 fork onward the equivocation reporting window is bounded by the transaction
+        // validity window; before that it was a full epoch. Gating on the reporting block's version
+        // makes the consensus change activate atomically at the upgrade.
+        let last_reportable_block = if version >= upgrades::v2::EQUIVOCATION_REPORTING_WINDOW {
+            Policy::last_block_of_equivocation_reporting_window(self.block_number())
+        } else {
+            Policy::last_block_of_collateral_lockup(self.block_number())
+        };
+        block_number <= last_reportable_block
             && Policy::batch_at(block_number) >= Policy::batch_at(self.block_number())
     }
 
@@ -258,18 +278,23 @@ impl ForkProof {
             return Err(EquivocationProofError::NetworkMismatch);
         }
 
-        // Check that the headers have equal block numbers and seeds.
-        if self.header1.block_number != self.header2.block_number
-            || self.header1.seed.entropy() != self.header2.seed.entropy()
-        {
-            return Err(EquivocationProofError::SlotMismatch);
-        }
-
         // Check that the justifications are valid.
         if !signing_key.verify(&self.justification1, hash1.as_slice())
             || !signing_key.verify(&self.justification2, hash2.as_slice())
         {
             return Err(EquivocationProofError::InvalidJustification);
+        }
+
+        // Check that the headers have equal block numbers and seeds.
+        if self.header1.block_number != self.header2.block_number
+            || self
+                .header1
+                .seed
+                .try_entropy()
+                .zip(self.header2.seed.try_entropy())
+                .is_none_or(|(entropy1, entropy2)| entropy1 != entropy2)
+        {
+            return Err(EquivocationProofError::SlotMismatch);
         }
 
         Ok(())
@@ -444,10 +469,11 @@ pub struct DoubleVoteProof {
     proposal_hash1: Option<Blake2sHash>,
     /// Hash of proposal number 2.
     proposal_hash2: Option<Blake2sHash>,
-    /// Aggregate signature for proposal 1.
-    signature1: AggregateSignature,
-    /// Aggregate signature for proposal 2.
-    signature2: AggregateSignature,
+    /// Aggregate signature for proposal 1. Kept compressed so that deserializing
+    /// a proof stays cheap, it is only decompressed during verification.
+    signature1: CompressedSignature,
+    /// Aggregate signature for proposal 2. See `signature1`.
+    signature2: CompressedSignature,
     /// Signers for proposal 1.
     #[serialize_size(bitset_max_elem = Policy::SLOTS as usize)]
     signers1: BitSet,
@@ -477,8 +503,8 @@ impl DoubleVoteProof {
             validator_address,
             proposal_hash1,
             proposal_hash2,
-            signature1,
-            signature2,
+            signature1: signature1.0.compress(),
+            signature2: signature2.0.compress(),
             signers1,
             signers2,
         }
@@ -527,6 +553,11 @@ impl DoubleVoteProof {
         validators: &Validators,
         validator_slots: Range<u16>,
     ) -> Result<(), EquivocationProofError> {
+        let checked_signers1 = checked_signer_slots(&self.signers1)
+            .ok_or(EquivocationProofError::InvalidJustification)?;
+        let checked_signers2 = checked_signer_slots(&self.signers2)
+            .ok_or(EquivocationProofError::InvalidJustification)?;
+
         // Check that the proposals are not equal and in the right order:
         match self.proposal_hash1.cmp(&self.proposal_hash2) {
             Ordering::Less => {}
@@ -538,13 +569,17 @@ impl DoubleVoteProof {
         #[allow(clippy::redundant_clone)]
         if !validator_slots
             .clone()
-            .any(|s| self.signers1.contains(s as usize) && self.signers2.contains(s as usize))
+            .any(|s| checked_signers1.contains(&s) && checked_signers2.contains(&s))
         {
             return Err(EquivocationProofError::NoOverlap);
         }
 
+        // Only decompress the signatures once the cheap checks have passed.
+        let signature1 = uncompress_signature(&self.signature1)?;
+        let signature2 = uncompress_signature(&self.signature2)?;
+
         let verify =
-            |proposal_hash, signers: &BitSet, signature| -> Result<(), EquivocationProofError> {
+            |proposal_hash, signers: &[u16], signature| -> Result<(), EquivocationProofError> {
                 // Calculate the message that was actually signed by the validators.
                 let message = TendermintVote {
                     proposal_hash,
@@ -552,9 +587,15 @@ impl DoubleVoteProof {
                 };
                 // Verify the signatures.
                 let mut agg_pk = AggregatePublicKey::new();
-                for (i, pk) in validators.voting_keys().iter().enumerate() {
-                    if signers.contains(i) {
+                for slot in signers {
+                    if let Some(pk) = validators
+                        .get_validator_by_slot_number(*slot)
+                        .voting_key
+                        .uncompress()
+                    {
                         agg_pk.aggregate(pk);
+                    } else {
+                        return Err(EquivocationProofError::InvalidJustification);
                     }
                 }
                 if !agg_pk.verify(&message, signature) {
@@ -563,16 +604,8 @@ impl DoubleVoteProof {
                 Ok(())
             };
 
-        verify(
-            self.proposal_hash1.clone(),
-            &self.signers1,
-            &self.signature1,
-        )?;
-        verify(
-            self.proposal_hash2.clone(),
-            &self.signers2,
-            &self.signature2,
-        )?;
+        verify(self.proposal_hash1.clone(), &checked_signers1, &signature1)?;
+        verify(self.proposal_hash2.clone(), &checked_signers2, &signature2)?;
         Ok(())
     }
 }
@@ -591,15 +624,16 @@ impl SerializeContent for DoubleVoteProof {
 
 #[cfg(test)]
 mod test {
-    use nimiq_bls::{AggregateSignature, SecretKey};
+    use nimiq_bls::{AggregateSignature, CompressedSignature, SecretKey};
     use nimiq_collections::BitSet;
     use nimiq_hash::{Blake2bHash, Blake2sHash, Hash, HashOutput};
     use nimiq_keys::{Address, KeyPair, PrivateKey};
     use nimiq_primitives::{
-        networks::NetworkId, policy::Policy, TendermintIdentifier, TendermintProposal,
-        TendermintStep, TendermintVote,
+        networks::NetworkId, policy::Policy, slots_allocation::Validators, TendermintIdentifier,
+        TendermintProposal, TendermintStep, TendermintVote,
     };
-    use nimiq_serde::Deserialize;
+    use nimiq_serde::{Deserialize, Serialize, SerializedMaxSize, SerializedSize};
+    use nimiq_test_log::test;
     use nimiq_vrf::VrfSeed;
 
     use crate::{
@@ -711,6 +745,139 @@ mod test {
         assert_eq!(proof1.sort_key(), proof2.sort_key());
         assert_eq!(proof1.sort_key(), proof3.sort_key());
         assert_ne!(proof1.sort_key(), proof4.sort_key());
+    }
+
+    #[test]
+    fn is_valid_at_is_version_gated() {
+        let key = KeyPair::from(
+            PrivateKey::from_bytes(
+                &hex::decode("8a535c4be49186007503231c8569f873eb512eae308d9be7e7de20af1ddc1663")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+
+        let offense_block = Policy::genesis_block_number();
+        let header1 = MicroHeader {
+            network: NetworkId::UnitAlbatross,
+            version: 1,
+            block_number: offense_block,
+            timestamp: 0,
+            parent_hash: Blake2bHash::default(),
+            seed: VrfSeed::default(),
+            extra_data: vec![],
+            state_root: Blake2bHash::default(),
+            body_root: Blake2sHash::default(),
+            diff_root: Blake2bHash::default(),
+            history_root: Blake2bHash::default(),
+            ..Default::default()
+        };
+        let mut header2 = header1.clone();
+        header2.timestamp = 1;
+
+        let justification1 = key.sign(header1.hash().as_bytes());
+        let justification2 = key.sign(header2.hash().as_bytes());
+        let proof: EquivocationProof = ForkProof::new(
+            Address::burn_address(),
+            header1,
+            justification1,
+            header2,
+            justification2,
+        )
+        .into();
+        assert_eq!(proof.block_number(), offense_block);
+
+        // A block past the (short) equivocation window but still within the legacy one-epoch window.
+        let block = Policy::last_block_of_equivocation_reporting_window(offense_block) + 1;
+        assert!(block <= Policy::last_block_of_collateral_lockup(offense_block));
+
+        // Legacy versions still accept it; from version 2 on it is rejected.
+        assert!(proof.is_valid_at(block, 1));
+        assert!(!proof.is_valid_at(block, 2));
+
+        // At the equivocation window edge it remains valid under the new rules.
+        let edge = Policy::last_block_of_equivocation_reporting_window(offense_block);
+        assert!(proof.is_valid_at(edge, 2));
+    }
+
+    #[test]
+    fn fork_proof_invalid_seed_returns_slot_mismatch() {
+        let key = KeyPair::from(
+            PrivateKey::from_bytes(
+                &hex::decode("8a535c4be49186007503231c8569f873eb512eae308d9be7e7de20af1ddc1663")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+
+        let valid_seed = VrfSeed::default().sign_next(&key, Policy::genesis_block_number());
+        let mut invalid_seed = None;
+
+        for i in 0..32 {
+            for byte in u8::MIN..=u8::MAX {
+                let mut invalid_seed_bytes = valid_seed.serialize_to_vec();
+                if invalid_seed_bytes[i] == byte {
+                    continue;
+                }
+                invalid_seed_bytes[i] = byte;
+
+                let candidate = VrfSeed::deserialize_all(&invalid_seed_bytes).unwrap();
+                if candidate.try_entropy().is_none() {
+                    invalid_seed = Some(candidate);
+                    break;
+                }
+            }
+
+            if invalid_seed.is_some() {
+                break;
+            }
+        }
+
+        let invalid_seed = invalid_seed.expect("could not construct invalid VRF seed");
+
+        let header1 = MicroHeader {
+            network: NetworkId::UnitAlbatross,
+            version: Policy::max_supported_version(),
+            block_number: Policy::genesis_block_number(),
+            timestamp: 0,
+            parent_hash: Blake2bHash::default(),
+            seed: invalid_seed,
+            extra_data: vec![],
+            state_root: Blake2bHash::default(),
+            body_root: Blake2sHash::default(),
+            diff_root: Blake2bHash::default(),
+            history_root: Blake2bHash::default(),
+            ..Default::default()
+        };
+        let header2 = MicroHeader {
+            network: NetworkId::UnitAlbatross,
+            version: Policy::max_supported_version(),
+            block_number: Policy::genesis_block_number(),
+            timestamp: 1,
+            parent_hash: "".hash(),
+            seed: valid_seed,
+            extra_data: vec![],
+            state_root: "".hash(),
+            body_root: Blake2sHash::default(),
+            diff_root: "".hash(),
+            history_root: "".hash(),
+            ..Default::default()
+        };
+
+        let justification1 = key.sign(header1.hash().as_bytes());
+        let justification2 = key.sign(header2.hash().as_bytes());
+        let proof = ForkProof::new(
+            Address::burn_address(),
+            header1,
+            justification1,
+            header2,
+            justification2,
+        );
+
+        assert_eq!(
+            proof.verify_excluding_address_and_network(&key.public),
+            Err(crate::EquivocationProofError::SlotMismatch)
+        );
     }
 
     #[test]
@@ -872,7 +1039,7 @@ mod test {
 
     #[test]
     fn double_vote_proof_sort_key() {
-        let key = SecretKey::deserialize_from_vec(&hex::decode("f82ec9bb46d94c6bd6272d55e08fa5bfb911257136d205d7ee41c4f8fd839cf7a38e156c23d03c10597a4faa52a28a638756cdd83355db3eaafe37c5a94cc5c062f6de73890a6387175e579ef0083e3fe516dc61c2fab73e2183ea58a0b700").unwrap()).unwrap();
+        let key = bls_key();
 
         let signers: BitSet = [0].into_iter().collect();
 
@@ -1054,5 +1221,73 @@ mod test {
         different.sort_by_key(|p1| p1.sort_key());
         different.dedup_by(|p1, p2| p1.sort_key() == p2.sort_key());
         assert_eq!(different.len(), num_different);
+    }
+
+    fn bls_key() -> SecretKey {
+        SecretKey::deserialize_from_vec(&hex::decode("f82ec9bb46d94c6bd6272d55e08fa5bfb911257136d205d7ee41c4f8fd839cf7a38e156c23d03c10597a4faa52a28a638756cdd83355db3eaafe37c5a94cc5c062f6de73890a6387175e579ef0083e3fe516dc61c2fab73e2183ea58a0b700").unwrap()).unwrap()
+    }
+
+    fn double_vote_proof() -> DoubleVoteProof {
+        let key = bls_key();
+        let id = TendermintIdentifier {
+            network: NetworkId::UnitAlbatross,
+            block_number: 1,
+            round_number: 2,
+            step: TendermintStep::PreVote,
+        };
+        let signature1 = AggregateSignature::from_signatures(&[key.sign(&TendermintVote {
+            proposal_hash: None,
+            id: id.clone(),
+        })]);
+        let signature2 = AggregateSignature::from_signatures(&[key.sign(&TendermintVote {
+            proposal_hash: Some(Blake2sHash::default()),
+            id: id.clone(),
+        })]);
+        let signers: BitSet = [0, 5].into_iter().collect();
+        DoubleVoteProof::new(
+            id,
+            Address::burn_address(),
+            None,
+            signature1,
+            signers.clone(),
+            Some(Blake2sHash::default()),
+            signature2,
+            signers,
+        )
+    }
+
+    /// Storing the signatures compressed must not change the wire format.
+    #[test]
+    fn double_vote_proof_serialization_is_unchanged() {
+        // Captured before `DoubleVoteProof` stored its signatures compressed.
+        const EXPECTED: &str = "020000000000000000000000000000000000000000070102030001000000000000000000000000000000000000000000000000000000000000000093e47df00fcb827d884447a156cb8322849852549be03f6fd8c280fc514e7e32607c1a14e4794219896b65cef2048d87db5c172a18596f6df839e3d075b1d0bb99dd1f7ea339c95ca2b381025c90c09d590f8aa966764dec16d0f15c37bc00485ae09ef67a10aa590e3cc75cf512086e7accf7d76d88010ae7139b4d9c9c479875556e6a77687ee7ce268e2798fa260481ab54944b036d80fb54991a3f6004ff6c7b5a64afe4934ede372f514589d49c593fb73e70cee368a0e36e8e918101210121";
+
+        let proof: EquivocationProof = double_vote_proof().into();
+        let bytes = proof.serialize_to_vec();
+        assert_eq!(hex::encode(&bytes), EXPECTED);
+        assert_eq!(DoubleVoteProof::MAX_SIZE, 448);
+
+        let decoded = EquivocationProof::deserialize_from_vec(&bytes).unwrap();
+        assert_eq!(decoded, proof);
+        assert_eq!(decoded.serialize_to_vec(), bytes);
+    }
+
+    /// Deserializing a double vote proof must not decompress its signatures.
+    /// An invalid signature is only detected when the proof is verified.
+    #[test]
+    fn double_vote_proof_signatures_are_decompressed_lazily() {
+        let mut proof = double_vote_proof();
+        // Not the encoding of a valid curve point.
+        proof.signature1 = CompressedSignature {
+            signature: [0xff; CompressedSignature::SIZE],
+        };
+        assert!(proof.signature1.uncompress().is_err());
+
+        let decoded = DoubleVoteProof::deserialize_from_vec(&proof.serialize_to_vec()).unwrap();
+
+        assert_eq!(
+            decoded.verify_excluding_address_and_network(&Validators::new(vec![]), 0..1),
+            Err(crate::EquivocationProofError::InvalidJustification),
+        );
     }
 }

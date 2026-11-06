@@ -39,6 +39,11 @@ impl<H: Merge + Eq, T: Hash<H>> SizeProof<H, T> {
     }
 }
 
+/// Largest `mmr_size` we are willing to verify. Anything above this is physically
+/// impossible (a valid MMR with this many nodes would be a gigantic state).
+/// Rejecting early turns crafted sizes into a clean `InvalidProof`.
+pub(crate) const MAX_MMR_SIZE: usize = usize::MAX / 2;
+
 /// A Merkle proof for a MMR.
 #[derive(Clone, Debug)]
 #[cfg_attr(
@@ -66,10 +71,22 @@ impl<H: Merge + Clone> Proof<H> {
     where
         T: Hash<H>,
     {
+        // Reject proofs whose `mmr_size` is large enough to wedge `PeakIterator`
+        // or overflow `Position` arithmetic. No legitimate MMR ever reaches this.
+        if self.mmr_size > MAX_MMR_SIZE {
+            return Err(Error::InvalidProof);
+        }
+
         // Sort by positions and check that we only prove leaves.
         let positions: Result<Vec<(Position, H)>, Error> = leaves
             .iter()
             .map(|(index, value)| {
+                // Reject out-of-range leaf numbers before the Position arithmetic, which does
+                // not terminate for huge inputs. A tree never has more leaves than nodes, so
+                // this never refuses a valid leaf
+                if *index >= self.mmr_size {
+                    return Err(Error::ProveInvalidLeaves);
+                }
                 let pos = Position::from(leaf_number_to_index(*index));
                 // Make sure that we only ever prove leaf nodes.
                 if pos.index >= self.mmr_size {
@@ -81,6 +98,14 @@ impl<H: Merge + Clone> Proof<H> {
             .collect();
         let mut positions = positions?;
         positions.sort_unstable_by_key(|(pos, _)| *pos);
+
+        // A leaf can only be proven once. If a position is listed twice, both copies climb the
+        // tree independently and only the first one to reach the peak is hashed into the root,
+        // so a second (forged) item at an already-proven position would be accepted without
+        // ever being hashed
+        if positions.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(Error::InvalidProof);
+        }
 
         let peaks = self.calculate_peak_roots(&positions)?;
         bagging(peaks.into_iter().map(Ok).rev())
@@ -202,6 +227,13 @@ impl<H: Merge + Clone + Eq> Proof<H> {
     where
         T: Hash<H>,
     {
+        // Must run before the `mmr_size == 0` shortcut below, otherwise a crafted
+        // proof with empty `nodes` and oversize `mmr_size` would never reach the
+        // guard in `calculate_root`.
+        if self.mmr_size > MAX_MMR_SIZE {
+            return Err(Error::InvalidProof);
+        }
+
         // If the proof came from an empty tree we just need to check that we are not trying to
         // prove any leaves and that the given root matches the empty tree root.
         if self.mmr_size == 0 && self.nodes.is_empty() {
@@ -318,6 +350,35 @@ mod tests {
         mmr::{utils::test_utils::TestHash, MerkleMountainRange},
         store::{memory::MemoryStore, Store},
     };
+
+    #[test]
+    fn calculate_root_rejects_out_of_range_leaf_index() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        // A leaf number with the top bit set used to wedge `calculate_root`: under release
+        // (overflow-checks off) `leaf_number_to_index` -> `Position::from` -> `index_to_height`
+        // never terminated. Run it on a worker thread so a regression surfaces as a timeout
+        // instead of hanging the whole test binary.
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let leaf: usize = 1;
+            let leaves = [(0x8000_0000_0000_0000usize, &leaf)];
+            let proof: Proof<TestHash> = Proof {
+                mmr_size: 4,
+                nodes: vec![TestHash(42)],
+            };
+            let _ = tx.send(proof.calculate_root(&leaves));
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => assert_eq!(result, Err(Error::ProveInvalidLeaves)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("calculate_root did not return within 10s: non-terminating loop")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("worker thread panicked before returning")
+            }
+        }
+    }
 
     #[test]
     fn it_correctly_constructs_proofs() {
@@ -518,6 +579,64 @@ mod tests {
         assert_eq!(
             proof.verify(&mmr.get_root().unwrap(), &[(2, &0)]),
             Err(Error::ProveInvalidLeaves)
+        );
+    }
+
+    #[test]
+    fn it_rejects_duplicate_leaf_positions() {
+        let nodes = [2, 3, 4, 5];
+
+        let store = MemoryStore::new();
+        let mut mmr = MerkleMountainRange::<TestHash, _>::new(store);
+
+        for &v in nodes.iter() {
+            mmr.push(&v).unwrap();
+        }
+        let root = mmr.get_root().unwrap();
+
+        /*        6
+         *      /   \
+         *     2     5
+         *    / \   / \
+         *   0   1 3   4
+         */
+        // The prover does not reject duplicates either, so this is exactly what a malicious
+        // peer would send: every sibling on the path of leaf 1 appears twice
+        let proof = mmr.prove(&[1, 1], None).unwrap();
+        assert_eq!(proof.nodes.len(), 4);
+
+        // Genuine item followed by a forged one at the same position
+        assert_eq!(
+            proof.verify(&root, &[(1, &3), (1, &99)]),
+            Err(Error::InvalidProof)
+        );
+        // Forged item first
+        assert_eq!(
+            proof.verify(&root, &[(1, &99), (1, &3)]),
+            Err(Error::InvalidProof)
+        );
+        // Even the genuine item twice is not a valid proof
+        assert_eq!(
+            proof.verify(&root, &[(1, &3), (1, &3)]),
+            Err(Error::InvalidProof)
+        );
+        // Duplicates are rejected regardless of the input order
+        let proof = mmr.prove(&[1, 3, 1], None).unwrap();
+        assert_eq!(
+            proof.verify(&root, &[(1, &3), (3, &5), (1, &99)]),
+            Err(Error::InvalidProof)
+        );
+
+        // Single-leaf tree, where the leaf is the peak itself
+        let store = MemoryStore::new();
+        let mut mmr = MerkleMountainRange::<TestHash, _>::new(store);
+        mmr.push(&2).unwrap();
+        let root = mmr.get_root().unwrap();
+
+        let proof = mmr.prove(&[0, 0], None).unwrap();
+        assert_eq!(
+            proof.verify(&root, &[(0, &2), (0, &99)]),
+            Err(Error::InvalidProof)
         );
     }
 
@@ -797,5 +916,36 @@ mod tests {
             proof.verify_with_start(&mmr.get_root().unwrap(), 2, &[0]),
             Err(Error::ProveInvalidLeaves)
         );
+    }
+
+    /// A crafted `Proof` with `mmr_size > MAX_MMR_SIZE` must be rejected
+    /// as `InvalidProof` by both `calculate_root` and `verify`, rather than panicking
+    /// or hanging inside `PeakIterator::new`.
+    #[test]
+    fn calculate_root_rejects_oversized_mmr_size() {
+        let leaf: usize = 1;
+        let leaves = [(0usize, &leaf)];
+
+        for bad_size in [usize::MAX, (usize::MAX / 2) + 1] {
+            let proof: Proof<TestHash> = Proof {
+                mmr_size: bad_size,
+                nodes: vec![TestHash(42)],
+            };
+            assert_eq!(proof.calculate_root(&leaves), Err(Error::InvalidProof));
+            assert_eq!(
+                proof.verify(&TestHash(0), &leaves),
+                Err(Error::InvalidProof)
+            );
+        }
+
+        // At the boundary `mmr_size == MAX_MMR_SIZE` we do not short-circuit on
+        // size; the proof proceeds into verification. The outcome is necessarily
+        // an `Err` (the crafted proof is not consistent), but the important bit
+        // is that verification terminates cleanly rather than hanging/panicking.
+        let proof_at_boundary: Proof<TestHash> = Proof {
+            mmr_size: MAX_MMR_SIZE,
+            nodes: vec![TestHash(42)],
+        };
+        assert!(proof_at_boundary.calculate_root(&leaves).is_err());
     }
 }

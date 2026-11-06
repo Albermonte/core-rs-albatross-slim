@@ -35,14 +35,10 @@ pub struct ConfigFile {
     pub network: NetworkSettings,
     #[serde(default)]
     pub consensus: ConsensusSettings,
-    #[serde(default)]
-    pub zk_prover: Option<ZKProverSettings>,
     pub rpc_server: Option<RpcServerSettings>,
     pub metrics_server: Option<MetricsServerSettings>,
     #[serde(default)]
     pub log: LogSettings,
-    #[serde(default)]
-    pub prover_log: LogSettings,
     pub database: Option<DatabaseSettings>,
     #[cfg(feature = "nimiq-mempool")]
     pub mempool: Option<MempoolSettings>,
@@ -412,6 +408,7 @@ pub struct MempoolSettings {
     pub filter: Option<MempoolFilterSettings>,
     pub size_limit: Option<usize>,
     pub control_size_limit: Option<usize>,
+    pub tx_per_sender_limit: Option<usize>,
     pub blacklist_limit: Option<usize>,
 }
 
@@ -473,6 +470,9 @@ impl From<MempoolSettings> for MempoolConfig {
             control_size_limit: mempool
                 .control_size_limit
                 .unwrap_or(Mempool::DEFAULT_CONTROL_SIZE_LIMIT),
+            tx_per_sender_limit: mempool
+                .tx_per_sender_limit
+                .unwrap_or(Mempool::DEFAULT_TX_PER_SENDER_LIMIT),
             filter_limit: mempool
                 .blacklist_limit
                 .unwrap_or(MempoolFilter::DEFAULT_BLACKLIST_SIZE),
@@ -516,11 +516,4 @@ pub struct ValidatorSettings {
     pub dht_fallback_url: Option<Url>,
     #[serde(default)]
     pub automatic_reactivate: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ZKProverSettings {
-    #[serde(default)]
-    pub prover_keys_path: Option<String>,
 }

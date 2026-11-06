@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Consensus logic of Nimiq's Albatross implementation"
 homepage.workspace = true
 repository.workspace = true
@@ -20,18 +21,18 @@ maintenance = { status = "experimental" }
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
 futures = { workspace = true }
-hashlink = "0.11"
+hashlink = "0.12"
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 log = { workspace = true }
 parking_lot = "0.12"
 pin-project = "1.1"
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.49", features = ["rt", "sync", "time"] }
+tokio = { version = "1.52", features = ["rt", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
 
 nimiq-account = { workspace = true, default-features = false }
 nimiq-block = { workspace = true }
@@ -39,6 +40,7 @@ nimiq-blockchain = { workspace = true, optional = true }
 nimiq-blockchain-interface = { workspace = true }
 nimiq-blockchain-proxy = { workspace = true, default-features = false }
 nimiq-bls = { workspace = true }
+nimiq-genesis = { workspace = true }
 nimiq-hash = { workspace = true }
 nimiq-keys = { workspace = true }
 nimiq-light-blockchain = { workspace = true }
@@ -50,14 +52,12 @@ nimiq-serde = { workspace = true }
 nimiq-time = { workspace = true }
 nimiq-transaction = { workspace = true }
 nimiq-utils = { workspace = true, features = ["futures", "merkle", "spawn", "time"] }
-nimiq-zkp-component = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"
 
 nimiq-bls = { workspace = true }
 nimiq-database = { workspace = true }
-nimiq-genesis = { workspace = true }
 nimiq-genesis-builder = { workspace = true }
 nimiq-keys = { workspace = true }
 nimiq-network-mock = { workspace = true }
@@ -68,7 +68,6 @@ nimiq-test-log = { workspace = true }
 nimiq-test-utils = { workspace = true }
 nimiq-transaction-builder = { workspace = true }
 nimiq-trie = { workspace = true }
-nimiq-zkp-component = { workspace = true, features = ["zkp-prover", "parallel"] }
 
 [features]
 expensive-tests = []

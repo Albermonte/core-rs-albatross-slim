@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, num::NonZeroU8, sync::Arc, time::Duration};
 
-use futures::{Stream, StreamExt};
+use futures::{stream::BoxStream, Stream, StreamExt};
 use instant::SystemTime;
 use libp2p::{
     gossipsub,
@@ -12,11 +12,12 @@ use nimiq_keys::{Address, KeyPair};
 use nimiq_network_interface::{
     network::{CloseReason, MsgAcceptance, Network as NetworkInterface, NetworkEvent, Topic},
     peer_info::Services,
+    validator_record::ValidatorRecord,
 };
 use nimiq_network_libp2p::{
     dht,
     discovery::{self, peer_contacts::PeerContact},
-    Config, Network,
+    Config, Network, NetworkError,
 };
 use nimiq_serde::{Deserialize, Serialize};
 use nimiq_test_log::test;
@@ -27,7 +28,6 @@ use nimiq_utils::{
     spawn,
     tagged_signing::{TaggedKeyPair, TaggedSignable, TaggedSigned},
 };
-use nimiq_validator_network::validator_record::ValidatorRecord;
 use parking_lot::RwLock;
 
 mod helper;
@@ -47,6 +47,7 @@ fn network_config(address: Multiaddr) -> Config {
     .expect("PeerContact must be creatable");
 
     let gossipsub = gossipsub::ConfigBuilder::default()
+        .validate_messages()
         .validation_mode(gossipsub::ValidationMode::Permissive)
         .build()
         .expect("Invalid Gossipsub config");
@@ -102,7 +103,7 @@ impl TestNetwork {
         self.next_address += 1;
 
         let net = Network::new(network_config(address.clone()), ()).await;
-        net.listen_on(vec![address.clone()]).await;
+        net.listen_on(vec![address.clone()]).await.unwrap();
 
         log::debug!(address = %address, peer_id = %net.get_local_peer_id(), "Creating node");
 
@@ -129,10 +130,10 @@ async fn create_connected_networks() -> (Network, Network) {
     let addr2 = multiaddr![Memory(rand::random::<u64>())];
 
     let net1 = Network::new(network_config(addr1.clone()), ()).await;
-    net1.listen_on(vec![addr1.clone()]).await;
+    net1.listen_on(vec![addr1.clone()]).await.unwrap();
 
     let net2 = Network::new(network_config(addr2.clone()), ()).await;
-    net2.listen_on(vec![addr2.clone()]).await;
+    net2.listen_on(vec![addr2.clone()]).await.unwrap();
 
     log::debug!(address = %addr1, peer_id = %net1.get_local_peer_id(), "Network 1");
     log::debug!(address = %addr2, peer_id = %net2.get_local_peer_id(), "Network 2");
@@ -162,10 +163,10 @@ async fn create_double_connected_networks() -> (Network, Network) {
     let addr2 = multiaddr![Memory(rand::random::<u64>())];
 
     let net1 = Network::new(network_config(addr1.clone()), ()).await;
-    net1.listen_on(vec![addr1.clone()]).await;
+    net1.listen_on(vec![addr1.clone()]).await.unwrap();
 
     let net2 = Network::new(network_config(addr2.clone()), ()).await;
-    net2.listen_on(vec![addr2.clone()]).await;
+    net2.listen_on(vec![addr2.clone()]).await.unwrap();
 
     log::debug!(address = %addr1, peer_id = %net1.get_local_peer_id(), "Network 1");
     log::debug!(address = %addr2, peer_id = %net2.get_local_peer_id(), "Network 2");
@@ -245,6 +246,17 @@ impl dht::Verifier for Verifier {
     }
 }
 
+struct RejectingVerifier;
+
+impl dht::Verifier for RejectingVerifier {
+    fn verify(
+        &self,
+        _record: &libp2p::kad::Record,
+    ) -> Result<dht::DhtRecord, dht::DhtVerifierError> {
+        Err(dht::DhtVerifierError::InvalidSignature)
+    }
+}
+
 async fn create_network_with_n_peers(
     n_peers: usize,
 ) -> (
@@ -266,7 +278,7 @@ async fn create_network_with_n_peers(
         addresses.push(addr.clone());
 
         let network = Network::new(network_config(addr.clone()), Verifier::new(&keys)).await;
-        network.listen_on(vec![addr.clone()]).await;
+        network.listen_on(vec![addr.clone()]).await.unwrap();
 
         log::debug!(address = %addr, peer_id = %network.get_local_peer_id(), "Network {}", peer);
         let local_peer_id = network.get_local_peer_id();
@@ -425,6 +437,45 @@ async fn two_networks_can_connect_double_dial() {
 }
 
 #[test(tokio::test)]
+async fn listen_on_taken_address_returns_error() {
+    // A non-zero port, since `/memory/0` would give each network its own port.
+    let address = multiaddr![Memory(rand::random::<u64>().max(1))];
+    let net1 = Network::new(network_config(address.clone()), ()).await;
+    let net2 = Network::new(network_config(address.clone()), ()).await;
+
+    net1.listen_on(vec![address.clone()]).await.unwrap();
+    let result = net2.listen_on(vec![address.clone()]).await;
+    assert!(
+        matches!(&result, Err(NetworkError::Listen { address: failed, .. }) if *failed == address),
+        "unexpected result: {result:?}",
+    );
+
+    // The swarm task survives the failed listen.
+    net2.network_info().await.unwrap();
+}
+
+#[test(tokio::test)]
+async fn failed_listen_on_closes_opened_listeners() {
+    let free_address = multiaddr![Memory(rand::random::<u64>().max(1))];
+    let taken_address = multiaddr![Memory(rand::random::<u64>().max(1))];
+    let net1 = Network::new(network_config(taken_address.clone()), ()).await;
+    net1.listen_on(vec![taken_address.clone()]).await.unwrap();
+
+    let net2 = Network::new(network_config(free_address.clone()), ()).await;
+    let result = net2
+        .listen_on(vec![free_address.clone(), taken_address])
+        .await;
+    assert!(
+        matches!(result, Err(NetworkError::Listen { .. })),
+        "unexpected result: {result:?}",
+    );
+
+    // The listener opened for the free address was closed, so the address is available again.
+    let net3 = Network::new(network_config(free_address.clone()), ()).await;
+    net3.listen_on(vec![free_address]).await.unwrap();
+}
+
+#[test(tokio::test)]
 async fn connections_are_properly_closed_events() {
     let (net1, net2) = create_connected_networks().await;
 
@@ -516,6 +567,58 @@ async fn dht_put_and_get() {
 }
 
 #[test(tokio::test)]
+#[cfg(feature = "kad")]
+async fn dht_get_with_verifier_failure_returns_error() {
+    let addr1 = multiaddr![Memory(rand::random::<u64>())];
+    let addr2 = multiaddr![Memory(rand::random::<u64>())];
+    let keys = Arc::new(RwLock::new(BTreeMap::default()));
+
+    let net1 = Network::new(network_config(addr1.clone()), Verifier::new(&keys)).await;
+    net1.listen_on(vec![addr1.clone()]).await.unwrap();
+
+    let net2 = Network::new(network_config(addr2.clone()), RejectingVerifier).await;
+    net2.listen_on(vec![addr2.clone()]).await.unwrap();
+
+    let mut events1 = net1.subscribe_events();
+    let mut events2 = net2.subscribe_events();
+
+    net2.dial_address(addr1).await.unwrap();
+
+    let event1 = helper::get_next_peer_event(&mut events1).await;
+    helper::assert_peer_joined(&event1, &net2.get_local_peer_id());
+
+    let event2 = helper::get_next_peer_event(&mut events2).await;
+    helper::assert_peer_joined(&event2, &net1.get_local_peer_id());
+
+    sleep(Duration::from_secs(10)).await;
+
+    let mut rng = test_rng(false);
+    let keypair = KeyPair::generate(&mut rng);
+    let key: Address = (&keypair.public).into();
+
+    let put_record = ValidatorRecord {
+        peer_id: net1.get_local_peer_id(),
+        validator_address: key.clone(),
+        timestamp: 0x42u64,
+    };
+
+    assert!(keys.write().insert(key.clone(), keypair.public).is_none());
+    net1.dht_put(&key, &put_record, &keypair).await.unwrap();
+
+    let result = timeout(
+        Duration::from_secs(2),
+        net2.dht_get::<_, ValidatorRecord<PeerId>, KeyPair>(&key),
+    )
+    .await;
+
+    assert!(result.is_ok(), "dht_get future hung");
+    assert!(matches!(
+        result.unwrap(),
+        Err(NetworkError::DhtGetVerificationFailed)
+    ));
+}
+
+#[test(tokio::test)]
 async fn ban_peer() {
     let (net1, net2) = create_connected_networks().await;
 
@@ -558,26 +661,39 @@ fn consume_stream<T: std::fmt::Debug>(mut stream: impl Stream<Item = T> + Unpin 
     spawn(async move { while stream.next().await.is_some() {} });
 }
 
-#[test(tokio::test)]
-async fn test_gossipsub() {
-    let mut net = TestNetwork::new();
-
+/// Sets up a Gossipsub mesh for topic `T`. Returns two of its peers and the first peer's
+/// subscription.
+async fn gossipsub_mesh<T: Topic + Sync>(
+    net: &mut TestNetwork,
+) -> (
+    Network,
+    Network,
+    BoxStream<'static, (T::Item, <Network as NetworkInterface>::PubsubId)>,
+) {
     let net1 = net.spawn().await;
     let net2 = net.spawn().await;
 
     // Our Gossipsub configuration requires a minimum of 6 peers for the mesh network
     for _ in 0..5i32 {
         let net_n = net.spawn().await;
-        let stream_n = net_n.subscribe::<TestTopic>().await.unwrap();
+        let stream_n = net_n.subscribe::<T>().await.unwrap();
         consume_stream(stream_n);
     }
 
-    let test_message = TestRecord { x: 42 };
-
-    let mut messages = net1.subscribe::<TestTopic>().await.unwrap();
-    consume_stream(net2.subscribe::<TestTopic>().await.unwrap());
+    let messages = net1.subscribe::<T>().await.unwrap();
+    consume_stream(net2.subscribe::<T>().await.unwrap());
 
     sleep(Duration::from_secs(10)).await;
+
+    (net1, net2, messages)
+}
+
+#[test(tokio::test)]
+async fn test_gossipsub() {
+    let mut net = TestNetwork::new();
+    let (net1, net2, mut messages) = gossipsub_mesh::<TestTopic>(&mut net).await;
+
+    let test_message = TestRecord { x: 42 };
 
     net2.publish::<TestTopic>(test_message.clone())
         .await
@@ -599,4 +715,36 @@ async fn test_gossipsub() {
         net2.publish::<TestTopic>(msg.clone()).await.unwrap();
     }
     net1.network_info().await.unwrap();
+}
+
+pub struct SizeLimitedTopic;
+
+impl Topic for SizeLimitedTopic {
+    type Item = Vec<u8>;
+
+    const BUFFER_SIZE: usize = 8;
+    const NAME: &'static str = "test-size-limited";
+    const VALIDATE: bool = true;
+    const MAX_MESSAGES: u32 = 1000;
+    const MAX_MESSAGE_SIZE: usize = 64;
+}
+
+#[test(tokio::test)]
+async fn test_gossipsub_drops_oversized_messages() {
+    let mut net = TestNetwork::new();
+    let (_net1, net2, mut messages) = gossipsub_mesh::<SizeLimitedTopic>(&mut net).await;
+
+    // The first message exceeds the topic's maximum message size, the second one doesn't.
+    let oversized = vec![1u8; 1000];
+    let small = vec![2u8; 10];
+    net2.publish::<SizeLimitedTopic>(oversized).await.unwrap();
+    net2.publish::<SizeLimitedTopic>(small.clone())
+        .await
+        .unwrap();
+
+    let (received_message, _) = timeout(Duration::from_secs(30), messages.next())
+        .await
+        .expect("No Gossipsub message received")
+        .unwrap();
+    assert_eq!(received_message, small);
 }

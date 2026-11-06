@@ -33,7 +33,6 @@ members = [
   "network-interface",
   "network-libp2p",
   "network-mock",
-  "pow-migration",
   "primitives",
   "primitives/account",
   "primitives/block",
@@ -60,54 +59,25 @@ members = [
   "vrf",
   "wallet",
   "web-client",
-  "zkp",
-  "zkp-circuits",
-  "zkp-component",
-  "zkp-component/zkp-prove",
-  "zkp-primitives",
-  "zkp-primitives/pedersen-generators",
 ]
 
 default-members = [
   "client",
 ]
+exclude = ["patches/gloo-timers"]
 
 resolver = "2"
 
-# Force nimiq-bls and nimiq-zkp to be built with optimization level 2 in
-# the test profiles. This is necessary in order to have decent tests
-# performance. We do the same with nimiq-bls dev profile because it is compiled
-# for a lot of other crates's tests.
+# Force nimiq-bls to be built with optimization level 2 in the test profiles.
+# This is necessary in order to have decent tests performance. We do the same
+# with nimiq-bls dev profile because it is compiled for a lot of other crates's
+# tests.
 #
 # This turned out to be faster than using the highest optimization level 3.
 [profile.dev.package.nimiq-bls]
 opt-level = 2
 
 [profile.test.package.nimiq-bls]
-opt-level = 2
-
-[profile.dev.package.nimiq-zkp-circuits]
-opt-level = 2
-
-[profile.test.package.nimiq-zkp-circuits]
-opt-level = 2
-
-[profile.dev.package.nimiq-zkp-primitives]
-opt-level = 2
-
-[profile.test.package.nimiq-zkp-primitives]
-opt-level = 2
-
-[profile.dev.package.nimiq-zkp]
-opt-level = 2
-
-[profile.test.package.nimiq-zkp]
-opt-level = 2
-
-[profile.dev.package.nimiq-pedersen-generators]
-opt-level = 2
-
-[profile.test.package.nimiq-pedersen-generators]
 opt-level = 2
 
 [profile.release]
@@ -122,6 +92,7 @@ strip = "debuginfo"
 [profile.release-with-debug]
 debug = true
 inherits = "release"
+split-debuginfo = "packed"  # .dwp on Linux, .dSYM on macOS
 
 # Force arkworks to be built with optimization level 2.
 [profile.dev.package.ark-ff]
@@ -136,33 +107,20 @@ opt-level = 2
 [profile.test.package.ark-ec]
 opt-level = 2
 
-[profile.dev.package.ark-mnt4-753]
-opt-level = 2
-
-[profile.test.package.ark-mnt4-753]
-opt-level = 2
-
 [profile.dev.package.ark-mnt6-753]
 opt-level = 2
 
 [profile.test.package.ark-mnt6-753]
 opt-level = 2
 
-[profile.dev.package.ark-crypto-primitives]
-opt-level = 2
-
-[profile.test.package.ark-crypto-primitives]
-opt-level = 2
-
 [patch.crates-io]
-ark-ec = { git = "https://github.com/paberr/algebra", branch = "pb/0.4" }
-ark-ff = { git = "https://github.com/paberr/algebra", branch = "pb/0.4" }
-ark-r1cs-std = { git = "https://github.com/paberr/r1cs-std", branch = "pb/fix-pedersen" }
+gloo-timers = { path = "patches/gloo-timers" }
 
 [workspace.package]
-version = "1.2.1"
+version = "2.3.0"
 authors = ["The Nimiq Core Development Team <info@nimiq.com>"]
 edition = "2024"
+rust-version = "1.94.1"
 homepage = "https://nimiq.com"
 repository = "https://github.com/nimiq/core-rs-albatross"
 license = "Apache-2.0"
@@ -201,10 +159,10 @@ nimiq-genesis-builder = { path = "genesis-builder", default-features = false }
 nimiq-handel = { path = "handel", default-features = false }
 nimiq-hash = { path = "hash", default-features = false }
 nimiq-hash_derive = { path = "hash/hash_derive", default-features = false }
-nimiq-jsonrpc-client = { version = "0.3.0", default-features = false }
-nimiq-jsonrpc-core = { version = "0.3.0", default-features = false }
-nimiq-jsonrpc-derive = { version = "0.3.0", default-features = false }
-nimiq-jsonrpc-server = { version = "0.3.0", default-features = false }
+nimiq-jsonrpc-client = { version = "0.5", default-features = false }
+nimiq-jsonrpc-core = { version = "0.5", default-features = false }
+nimiq-jsonrpc-derive = { version = "0.5", default-features = false }
+nimiq-jsonrpc-server = { version = "0.5", default-features = false }
 nimiq-key-derivation = { path = "key-derivation", default-features = false }
 nimiq-keys = { path = "keys", default-features = false }
 nimiq-light-blockchain = { path = "light-blockchain", default-features = false }
@@ -218,7 +176,6 @@ nimiq-mnemonic = { path = "mnemonic", default-features = false }
 nimiq-network-interface = { path = "network-interface", default-features = false }
 nimiq-network-libp2p = { path = "network-libp2p", default-features = false }
 nimiq-network-mock = { path = "network-mock", default-features = false }
-nimiq-pedersen-generators = { path = "zkp-primitives/pedersen-generators", default-features = false }
 nimiq-primitives = { path = "primitives", default-features = false }
 nimiq-rpc-interface = { path = "rpc-interface", default-features = false }
 nimiq-rpc-server = { path = "rpc-server", default-features = false }
@@ -238,7 +195,3 @@ nimiq-validator-network = { path = "validator-network", default-features = false
 nimiq-vrf = { path = "vrf", default-features = false }
 nimiq-wallet = { path = "wallet", default-features = false }
 nimiq-web-client = { path = "web-client", default-features = false }
-nimiq-zkp = { path = "zkp", default-features = false }
-nimiq-zkp-circuits = { path = "zkp-circuits", default-features = false }
-nimiq-zkp-component = { path = "zkp-component", default-features = false }
-nimiq-zkp-primitives = { path = "zkp-primitives", default-features = false }

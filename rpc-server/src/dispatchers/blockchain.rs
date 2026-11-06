@@ -508,7 +508,8 @@ impl BlockchainInterface for BlockchainDispatcher {
                     block_number,
                     disabled: staking_contract
                         .punished_slots
-                        .current_batch_punished_slots(),
+                        .previous_batch_punished_slots()
+                        .clone(),
                 },
                 &blockchain_proxy,
             ))
@@ -626,7 +627,9 @@ impl BlockchainInterface for BlockchainDispatcher {
                 let result = match event {
                     BlockchainEvent::Extended(hash) => Some(hash.into()),
                     BlockchainEvent::HistoryAdopted(hash) => Some(hash.into()),
-                    BlockchainEvent::Finalized(_) | BlockchainEvent::EpochFinalized(_) => None,
+                    BlockchainEvent::Finalized(_)
+                    | BlockchainEvent::EpochFinalized(_)
+                    | BlockchainEvent::ProtocolUpgrade(..) => None,
                     BlockchainEvent::Rebranched(_, new_branch) => {
                         Some(new_branch.last().unwrap().0.clone().into())
                     }

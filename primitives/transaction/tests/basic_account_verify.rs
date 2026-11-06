@@ -1,5 +1,9 @@
+mod common;
+
+use common::for_each_protocol_version;
 use nimiq_keys::{Address, ES256PublicKey, ES256Signature, PublicKey, Signature};
 use nimiq_primitives::{account::AccountType, networks::NetworkId, transaction::TransactionError};
+use nimiq_test_log::test;
 use nimiq_transaction::{account::AccountTransactionVerification, SignatureProof, Transaction};
 
 #[test]
@@ -18,10 +22,12 @@ fn it_does_not_allow_creation() {
         NetworkId::UnitAlbatross,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::InvalidForRecipient)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::InvalidForRecipient)
+        );
+    });
 }
 
 #[test]
@@ -39,10 +45,12 @@ fn it_does_not_allow_signalling() {
         NetworkId::UnitAlbatross,
     );
 
-    assert_eq!(
-        AccountType::verify_incoming_transaction(&transaction),
-        Err(TransactionError::ZeroValue)
-    );
+    for_each_protocol_version(|v| {
+        assert_eq!(
+            AccountType::verify_incoming_transaction(&transaction, v),
+            Err(TransactionError::ZeroValue)
+        );
+    });
 }
 
 #[test]

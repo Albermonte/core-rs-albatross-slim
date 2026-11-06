@@ -1,16 +1,26 @@
 use std::sync::Arc;
 
-use nimiq_block::{Block, BlockError};
+use nimiq_block::{Block, BlockError, MacroBlock};
 use nimiq_blockchain::Blockchain;
 use nimiq_blockchain_interface::{AbstractBlockchain, PushError, PushResult};
-use nimiq_hash::Hash;
-use nimiq_primitives::policy::Policy;
+use nimiq_hash::{Blake2bHash, Hash};
+use nimiq_primitives::policy::{upgrades, Policy};
 use nimiq_tendermint::ProposalMessage;
 use nimiq_test_log::test;
 use nimiq_test_utils::{
     block_production::TemporaryBlockProducer,
-    test_custom_block::{finalize_macro_block, next_macro_block_proposal},
+    test_custom_block::{
+        finalize_macro_block, finalize_macro_block_proposal, invalid_voting_key,
+        next_macro_block_proposal, replace_voting_keys,
+    },
+    versions::{assert_all_versions, bp},
 };
+
+fn produce_blocks(temp_producer: &TemporaryBlockProducer, count: u32) {
+    for _ in 0..count {
+        temp_producer.next_block(vec![], false);
+    }
+}
 
 #[test]
 fn prune_epoch_micro_blocks() {
@@ -167,5 +177,185 @@ fn can_detect_invalid_punished_set() {
     assert_eq!(
         temp_producer.push(block),
         Err(PushError::InvalidBlock(BlockError::InvalidValidators))
+    );
+}
+
+/// Builds the next macro block proposal, which must be an election block.
+fn next_election_block_proposal(temp_producer: &TemporaryBlockProducer) -> MacroBlock {
+    let blockchain = temp_producer.blockchain.read();
+    assert!(Policy::is_election_block_at(blockchain.block_number() + 1));
+    next_macro_block_proposal(
+        &temp_producer.producer.signing_key,
+        &blockchain,
+        &Default::default(),
+    )
+}
+
+#[test]
+fn it_rejects_justified_election_blocks_with_an_invalid_voting_key() {
+    let temp_producer = TemporaryBlockProducer::new();
+    produce_blocks(&temp_producer, Policy::blocks_per_epoch() - 1);
+
+    let mut proposal = next_election_block_proposal(&temp_producer);
+    proposal.header.validators.as_mut().unwrap().validators[0].voting_key = invalid_voting_key();
+    let block_hash = proposal.hash_blake2s();
+    let block = finalize_macro_block_proposal(
+        &temp_producer.producer.voting_key,
+        proposal,
+        block_hash,
+        &Default::default(),
+    );
+
+    // An end-to-end guard: the full node also rejects this with the same error in the post-commit
+    // comparison against the staking contract's validators. The light chain has no such
+    // comparison, so the light-blockchain tests are what pin the voting key check itself.
+    assert_eq!(
+        temp_producer.push(block),
+        Err(PushError::InvalidBlock(BlockError::InvalidValidators))
+    );
+}
+
+#[test]
+fn it_does_not_decompress_voting_keys_of_unjustified_election_blocks() {
+    let temp_producer = TemporaryBlockProducer::new();
+    produce_blocks(&temp_producer, Policy::blocks_per_epoch() - 1);
+
+    // Swap in fresh voting keys after computing the signed hash, so the justification doesn't
+    // match the block anymore.
+    let mut proposal = next_election_block_proposal(&temp_producer);
+    let block_hash = proposal.hash_blake2s();
+    let voting_keys = replace_voting_keys(proposal.header.validators.as_mut().unwrap());
+    let block = finalize_macro_block_proposal(
+        &temp_producer.producer.voting_key,
+        proposal,
+        block_hash,
+        &Default::default(),
+    );
+
+    assert_eq!(
+        temp_producer.push(block),
+        Err(PushError::InvalidBlock(BlockError::InvalidJustification))
+    );
+    assert!(voting_keys.iter().all(|key| !key.has_uncompressed()));
+}
+
+#[test]
+fn it_rejects_election_macro_block_proposals_with_wrong_interlink() {
+    let temp_producer = TemporaryBlockProducer::new();
+    produce_blocks(&temp_producer, Policy::blocks_per_epoch() - 1);
+
+    let blockchain = temp_producer.blockchain.upgradable_read();
+    assert!(Policy::is_election_block_at(blockchain.block_number() + 1));
+
+    let mut proposal = temp_producer
+        .producer
+        .next_macro_block_proposal(
+            &blockchain,
+            blockchain.timestamp() + Policy::BLOCK_SEPARATION_TIME,
+            0,
+            vec![],
+            None,
+        )
+        .unwrap();
+    let mut wrong_interlink = proposal
+        .header
+        .interlink
+        .clone()
+        .expect("Election block proposals must contain an interlink");
+    wrong_interlink.push(Blake2bHash::default());
+    proposal.header.interlink = Some(wrong_interlink);
+
+    assert_eq!(
+        blockchain.verify_macro_block_proposal(proposal, 0, None),
+        Err(PushError::InvalidBlock(BlockError::InvalidInterlink))
+    );
+}
+
+#[test]
+fn it_rejects_election_macro_block_proposals_with_missing_interlink() {
+    let temp_producer = TemporaryBlockProducer::new();
+    produce_blocks(&temp_producer, Policy::blocks_per_epoch() - 1);
+
+    let blockchain = temp_producer.blockchain.upgradable_read();
+    assert!(Policy::is_election_block_at(blockchain.block_number() + 1));
+
+    let mut proposal = temp_producer
+        .producer
+        .next_macro_block_proposal(
+            &blockchain,
+            blockchain.timestamp() + Policy::BLOCK_SEPARATION_TIME,
+            0,
+            vec![],
+            None,
+        )
+        .unwrap();
+    proposal.header.interlink = None;
+
+    assert_eq!(
+        blockchain.verify_macro_block_proposal(proposal, 0, None),
+        Err(PushError::InvalidBlock(BlockError::InvalidInterlink))
+    );
+}
+
+#[test]
+fn it_rejects_non_election_macro_block_proposals_with_superfluous_interlink() {
+    let temp_producer = TemporaryBlockProducer::new();
+    produce_blocks(&temp_producer, Policy::blocks_per_batch() - 1);
+
+    let blockchain = temp_producer.blockchain.upgradable_read();
+    assert!(!Policy::is_election_block_at(blockchain.block_number() + 1));
+
+    let mut proposal = temp_producer
+        .producer
+        .next_macro_block_proposal(
+            &blockchain,
+            blockchain.timestamp() + Policy::BLOCK_SEPARATION_TIME,
+            0,
+            vec![],
+            None,
+        )
+        .unwrap();
+    proposal.header.interlink = Some(vec![Blake2bHash::default()]);
+
+    assert_eq!(
+        blockchain.verify_macro_block_proposal(proposal, 0, None),
+        Err(PushError::InvalidBlock(BlockError::InvalidInterlink))
+    );
+}
+
+/// Seeds a chain at `version`, builds a macro block proposal whose `diff_root` does not match its
+/// real state diff, and returns the proposal verification result.
+fn verify_macro_proposal_with_wrong_diff_root(version: u16) -> Result<(), PushError> {
+    let temp_producer = TemporaryBlockProducer::new_with_protocol_version(version);
+    produce_blocks(&temp_producer, Policy::blocks_per_batch() - 1);
+
+    let blockchain = temp_producer.blockchain.upgradable_read();
+    let mut proposal = temp_producer
+        .producer
+        .next_macro_block_proposal(
+            &blockchain,
+            blockchain.timestamp() + Policy::BLOCK_SEPARATION_TIME,
+            0,
+            vec![],
+            None,
+        )
+        .unwrap();
+    proposal.header.diff_root = "invalid diff root".hash();
+
+    blockchain
+        .verify_macro_block_proposal(proposal, 0, None)
+        .map(|_| ())
+}
+
+/// When a validator verifies a macro block proposal, a wrong `diff_root` verifies before
+/// `DIFF_ROOT_COMMITMENT` and is rejected from it onward (so honest validators won't sign it).
+#[test]
+fn it_verifies_the_diff_root_in_a_macro_block_proposal_from_the_commitment_version() {
+    assert_all_versions(
+        |v| verify_macro_proposal_with_wrong_diff_root(v).is_ok(),
+        vec![bp(upgrades::v2::DIFF_ROOT_COMMITMENT, |v| {
+            verify_macro_proposal_with_wrong_diff_root(v)
+                == Err(PushError::InvalidBlock(BlockError::DiffRootMismatch))
+        })],
     );
 }

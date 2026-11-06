@@ -83,6 +83,7 @@ impl AccountTransactionInteraction for StakingContract {
                     None,
                     None,
                     false,
+                    block_state.number,
                     tx_logger,
                 )
                 .map(|_| None)
@@ -221,6 +222,17 @@ impl AccountTransactionInteraction for StakingContract {
                 )
                 .map(|receipt| Some(receipt.into()))
             }
+            IncomingStakingTransactionData::SetSignalData {
+                validator_address,
+                update,
+                proof,
+            } => {
+                // Get the signer's address from the proof.
+                let signer = proof.compute_signer();
+
+                self.set_signal_data(&mut store, &validator_address, &signer, update, tx_logger)
+                    .map(|receipt| Some(receipt.into()))
+            }
         }
     }
 
@@ -325,6 +337,13 @@ impl AccountTransactionInteraction for StakingContract {
                     receipt,
                     tx_logger,
                 )
+            }
+            IncomingStakingTransactionData::SetSignalData {
+                validator_address, ..
+            } => {
+                let receipt = receipt.ok_or(AccountError::InvalidReceipt)?.try_into()?;
+
+                self.revert_set_signal_data(&mut store, &validator_address, receipt, tx_logger)
             }
         }
     }
@@ -479,7 +498,7 @@ impl AccountTransactionInteraction for StakingContract {
                 } else {
                     // Update the balances of the validator and staking contract.
                     validator.deposit = new_deposit;
-                    validator.total_stake -= transaction.fee;
+                    validator.total_stake = validator.total_stake.safe_sub(transaction.fee)?;
                     self.balance -= transaction.fee;
 
                     // Update the validator entry.

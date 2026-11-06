@@ -28,10 +28,9 @@ use nimiq_test_utils::{
 };
 use nimiq_time::sleep;
 use nimiq_utils::time::OffsetTime;
-use nimiq_zkp_component::ZKPComponent;
 use parking_lot::{Mutex, RwLock};
 
-use crate::sync_utils::{sync_two_peers, SyncMode};
+use crate::sync_utils::{sync_two_peers, sync_two_peers_across_protocol_upgrade, SyncMode};
 
 mod sync_utils;
 
@@ -93,6 +92,11 @@ async fn two_peers_can_sync_two_epochs() {
         SyncMode::History,
     )
     .await
+}
+
+#[test(tokio::test)]
+async fn protocol_upgrade_event_is_emitted_during_history_sync() {
+    sync_two_peers_across_protocol_upgrade(SyncMode::History).await
 }
 
 #[test(tokio::test)]
@@ -193,13 +197,8 @@ async fn sync_ingredients() {
     // Produce the blocks.
     produce_macro_blocks(&producer, &blockchain1, num_macro_blocks);
 
-    let net1: Arc<Network> =
-        TestNetwork::build_network(2, Default::default(), &mut Some(hub)).await;
+    let net1 = Network::build_network(2, Default::default(), &mut Some(hub)).await;
     networks.push(Arc::clone(&net1));
-    let zkp_prover1 =
-        ZKPComponent::new(BlockchainProxy::from(&blockchain1), Arc::clone(&net1), None)
-            .await
-            .proxy();
     let blockchain1_proxy = BlockchainProxy::from(&blockchain1);
     let syncer1 = SyncerProxy::new_history(
         blockchain1_proxy.clone(),
@@ -210,12 +209,8 @@ async fn sync_ingredients() {
     .await;
     // The consensus itself is unused, but in from_network the request handlers are
     // spawned and thus this needs to execute as they are used later.
-    let _consensus1 = Consensus::from_network(
-        blockchain1_proxy.clone(),
-        Arc::clone(&net1),
-        syncer1,
-        zkp_prover1,
-    );
+    let _consensus1 =
+        Consensus::from_network(blockchain1_proxy.clone(), Arc::clone(&net1), syncer1);
 
     // Setup second peer (not synced yet).
     let env2 = MdbxDatabase::new_volatile(Default::default()).unwrap();
@@ -230,13 +225,8 @@ async fn sync_ingredients() {
         .unwrap(),
     ));
 
-    let net2: Arc<Network> =
-        TestNetwork::build_network(3, Default::default(), &mut Some(MockHub::default())).await;
+    let net2 = Network::build_network(3, Default::default(), &mut Some(MockHub::default())).await;
     networks.push(Arc::clone(&net2));
-    let zkp_prover2 =
-        ZKPComponent::new(BlockchainProxy::from(&blockchain2), Arc::clone(&net2), None)
-            .await
-            .proxy();
     let blockchain2_proxy = BlockchainProxy::from(&blockchain2);
     let syncer2 = SyncerProxy::new_history(
         blockchain2_proxy.clone(),
@@ -247,16 +237,12 @@ async fn sync_ingredients() {
     .await;
     // The consensus itself is unused, but in from_network the request handlers are
     // spawned and thus this needs to execute as they are used later.
-    let _consensus2 = Consensus::from_network(
-        blockchain2_proxy.clone(),
-        Arc::clone(&net2),
-        syncer2,
-        zkp_prover2,
-    );
+    let _consensus2 =
+        Consensus::from_network(blockchain2_proxy.clone(), Arc::clone(&net2), syncer2);
 
     // Connect the two peers.
     let mut stream = net2.subscribe_events();
-    Network::connect_networks(&networks, 3u64).await;
+    Network::connect_networks(&networks).await;
     // Then wait for connection to be established.
     let _ = stream.next().await.unwrap();
     sleep(Duration::from_secs(1)).await; // FIXME, Prof. Berrang told me to do this

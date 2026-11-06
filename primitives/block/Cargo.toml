@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Block primitives to be used in Nimiq's Albatross implementation"
 homepage.workspace = true
 repository.workspace = true
@@ -18,8 +19,8 @@ travis-ci = { repository = "nimiq/core-rs", branch = "master" }
 maintenance = { status = "experimental" }
 
 [dependencies]
-ark-ec = "0.4"
-bitflags = { version = "2.10", features = ["serde"] }
+ark-ec = "0.6"
+bitflags = { version = "2.12", features = ["serde"] }
 byteorder = "1.5"
 hex = "0.4"
 log = { workspace = true }
@@ -42,5 +43,6 @@ nimiq-utils = { workspace = true, features = ["merkle"] }
 nimiq-vrf = { workspace = true, features = ["serde-derive"] }
 
 [dev-dependencies]
+ark-serialize = "0.6"
 nimiq-test-log = { workspace = true }
 nimiq-test-utils = { workspace = true }

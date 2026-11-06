@@ -1,6 +1,5 @@
-use std::{num::NonZeroU8, sync::Arc};
+use std::{future::Future, num::NonZeroU8, sync::Arc};
 
-use async_trait::async_trait;
 use instant::SystemTime;
 use nimiq_hash::Blake2bHash;
 use nimiq_network_interface::{network::Network as NetworkInterface, peer_info::Services};
@@ -10,20 +9,22 @@ use nimiq_network_libp2p::{
 };
 use nimiq_network_mock::{MockHub, MockNetwork};
 
-#[async_trait]
 pub trait TestNetwork<N = Self>
 where
     N: NetworkInterface,
 {
-    async fn build_network(
+    /// Builds a network for tests.
+    ///
+    /// `peer_id` is only used by the mock network, as the network's address in the hub. The
+    /// libp2p network ignores it and listens on a random memory port.
+    fn build_network(
         peer_id: u64,
         genesis_hash: Blake2bHash,
         hub: &mut Option<MockHub>,
-    ) -> Arc<Self>;
-    async fn connect_networks(networks: &[Arc<N>], seed_peer_id: u64);
+    ) -> impl Future<Output = Arc<Self>> + Send;
+    fn connect_networks(networks: &[Arc<N>]) -> impl Future<Output = ()> + Send;
 }
 
-#[async_trait]
 impl TestNetwork for MockNetwork {
     async fn build_network(
         peer_id: u64,
@@ -36,7 +37,7 @@ impl TestNetwork for MockNetwork {
         Arc::new(hub.new_network_with_address(peer_id))
     }
 
-    async fn connect_networks(networks: &[Arc<MockNetwork>], _seed_peer_id: u64) {
+    async fn connect_networks(networks: &[Arc<MockNetwork>]) {
         // Connect validators to each other.
         for (id, network) in networks.iter().enumerate() {
             for other_id in (id + 1)..networks.len() {
@@ -47,15 +48,17 @@ impl TestNetwork for MockNetwork {
     }
 }
 
-#[async_trait]
 impl TestNetwork for Network {
     async fn build_network(
-        peer_id: u64,
+        _peer_id: u64,
         genesis_hash: Blake2bHash,
         _hub: &mut Option<MockHub>,
     ) -> Arc<Network> {
         let peer_key = Keypair::generate_ed25519();
-        let peer_address = multiaddr![Memory(peer_id)];
+        // libp2p's memory transport only releases a listening port on `remove_listener`, not when
+        // the swarm is dropped, so a port stays taken for the rest of the process. Tests sharing a
+        // process (`cargo test`) would collide on fixed ports, so pick a random non-zero one.
+        let peer_address = multiaddr![Memory(rand::random::<u64>().max(1))];
         let peer_contact = PeerContact::new(
             vec![peer_address.clone()],
             peer_key.public(),
@@ -85,15 +88,22 @@ impl TestNetwork for Network {
             1024,
         );
         let network = Arc::new(Network::new(config, ()).await);
-        network.listen_on(vec![peer_address]).await;
+        network
+            .listen_on(vec![peer_address])
+            .await
+            .expect("Failed to listen on provided address");
         network
     }
 
-    async fn connect_networks(networks: &[Arc<Network>], seed_peer_id: u64) {
-        let seed = multiaddr![Memory(seed_peer_id)];
-        // Skip the last network assuming the last one is the seed and doesn't make
-        // sense for the seed to connect to itself.
-        for network in &networks[0..networks.len() - 1] {
+    async fn connect_networks(networks: &[Arc<Network>]) {
+        // The last network is the seed and doesn't make sense for the seed to connect to itself.
+        let (seed_network, networks) = networks.split_last().expect("No networks to connect");
+        let seed = seed_network
+            .get_own_addresses()
+            .into_iter()
+            .next()
+            .expect("Seed has no address");
+        for network in networks {
             // Tell the network to connect to seed nodes
             network
                 .dial_address(seed.clone())

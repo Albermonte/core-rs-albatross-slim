@@ -1,17 +1,18 @@
 use std::str::FromStr;
 
 use nimiq_hash::{Blake2bHash, Hash};
-#[cfg(feature = "client")]
-use nimiq_primitives::policy::Policy;
-use nimiq_primitives::{account::AccountType, coin::Coin, networks::NetworkId};
+use nimiq_primitives::{account::AccountType, coin::Coin, networks::NetworkId, policy::Policy};
 use nimiq_serde::{Deserialize, Serialize};
 use nimiq_transaction::{
     account::staking_contract::OutgoingStakingTransactionData, PoWSignatureProof, TransactionFormat,
 };
 #[cfg(feature = "client")]
 use nimiq_transaction::{
-    historic_transaction::{HistoricTransaction, HistoricTransactionData, RewardEvent},
-    ExecutedTransaction,
+    historic_transaction::{
+        EquivocationEvent, HistoricTransaction, HistoricTransactionData, JailEvent, PenalizeEvent,
+        RewardEvent,
+    },
+    EquivocationLocator, ExecutedTransaction,
 };
 #[cfg(feature = "primitives")]
 use nimiq_transaction_builder::TransactionProofBuilder;
@@ -145,6 +146,10 @@ impl Transaction {
     /// of a transaction can be different key pairs (addresses). If no inner key pair is provided, the outer
     /// key pair is used for both signatures.
     ///
+    /// Throws when the transaction's recipient data is not valid data for an incoming staking
+    /// transaction, or when an incoming staking transaction is not sent from a basic account or
+    /// a vesting contract.
+    ///
     /// ### Limitations
     /// - HTLC redemption is not supported and will throw.
     #[cfg(feature = "primitives")]
@@ -168,19 +173,23 @@ impl Transaction {
         hash.to_hex()
     }
 
-    /// Verifies that a transaction has valid properties and a valid signature proof.
+    /// Verifies that a transaction has valid properties and a valid signature proof for the
+    /// provided `protocol_version`.
     /// Optionally checks if the transaction is valid on the provided network.
     ///
     /// **Throws with any transaction validity error.** Returns without exception if the transaction is valid.
     ///
+    /// A `protocol_version` of `0` is accepted for backwards-compatible pre-upgrade validation.
     /// Throws when the given networkId is unknown.
-    pub fn verify(&self, network_id: Option<u8>) -> Result<(), JsError> {
+    pub fn verify(&self, protocol_version: u16, network_id: Option<u8>) -> Result<(), JsError> {
         let network_id = match network_id {
             Some(id) => to_network_id(id)?,
             None => self.inner.network_id,
         };
 
-        self.inner.verify(network_id).map_err(JsError::from)
+        self.inner
+            .verify(network_id, protocol_version)
+            .map_err(JsError::from)
     }
 
     /// Tests if the transaction is valid at the specified block height.
@@ -267,9 +276,11 @@ impl Transaction {
     }
 
     /// The transaction's flags: `0b1` = contract creation, `0b10` = signaling.
+    /// Bit patterns outside the known variants collapse to `None`.
+    /// Inspect `toPlain().flags` for the raw value.
     #[wasm_bindgen(getter)]
     pub fn flags(&self) -> TransactionFlag {
-        u8::from(self.inner.flags).try_into().unwrap()
+        u8::from(self.inner.flags).into()
     }
 
     /// The transaction's data as a byte array.
@@ -389,11 +400,17 @@ impl Transaction {
         let proof = match proof_builder {
             TransactionProofBuilder::Basic(mut builder) => {
                 builder.sign_with_key_pair(key_pair.native_ref());
-                builder.generate().unwrap().proof
+                builder
+                    .generate()
+                    .ok_or_else(|| JsError::new("Failed to sign transaction"))?
+                    .proof
             }
             TransactionProofBuilder::Vesting(mut builder) => {
                 builder.sign_with_key_pair(key_pair.native_ref());
-                builder.generate().unwrap().proof
+                builder
+                    .generate()
+                    .ok_or_else(|| JsError::new("Failed to sign transaction"))?
+                    .proof
             }
             TransactionProofBuilder::Htlc(mut _builder) => {
                 // TODO: Create a separate HTLC signing method that takes the type of proof as an argument
@@ -420,13 +437,33 @@ impl Transaction {
             }
             TransactionProofBuilder::OutStaking(mut builder) => {
                 builder.sign_with_key_pair(key_pair.native_ref());
-                builder.generate().unwrap().proof
+                builder
+                    .generate()
+                    .ok_or_else(|| JsError::new("Failed to sign transaction"))?
+                    .proof
             }
             TransactionProofBuilder::InStaking(mut builder) => {
                 builder.sign_with_key_pair(inner_key_pair.unwrap_or(key_pair).native_ref());
-                let mut builder = builder.generate().unwrap().unwrap_basic();
+                // `generate` returns `None` when the recipient data could not be parsed as
+                // incoming staking transaction data, in which case it was left unsigned.
+                let inner_proof_builder = builder.generate().ok_or_else(|| {
+                    JsError::new("Invalid data for an incoming staking transaction")
+                })?;
+                // The remaining proof depends on the sender, which must be a basic account or a
+                // vesting contract for an incoming staking transaction.
+                let mut builder = match inner_proof_builder {
+                    TransactionProofBuilder::Basic(builder)
+                    | TransactionProofBuilder::Vesting(builder) => builder,
+                    _ => {
+                        return Err(JsError::new(
+                            "Incoming staking transactions must be sent from a basic account or a vesting contract",
+                        ))
+                    }
+                };
                 builder.sign_with_key_pair(key_pair.native_ref());
-                let tx = builder.generate().unwrap();
+                let tx = builder
+                    .generate()
+                    .ok_or_else(|| JsError::new("Failed to sign transaction"))?;
                 // Set the recipient data to the data with the added signature
                 self.set_recipient_data(tx.recipient_data);
                 tx.proof
@@ -472,30 +509,39 @@ impl Transaction {
                 .unwrap()
                 .to_string()
                 .to_lowercase(),
-            flags: self.flags() as u8,
+            flags: u8::from(self.inner.flags),
             sender_data: {
                 let raw_data = PlainRawData {
                     raw: hex::encode(self.sender_data()),
                 };
 
+                // `Transaction::new` does not validate contract data, so unparseable
+                // bytes fall back to the raw representation rather than panicking.
                 if self.inner.sender_type == AccountType::Staking {
-                    let data = OutgoingStakingTransactionData::parse(&self.inner).unwrap();
-                    match data {
-                        OutgoingStakingTransactionData::DeleteValidator => {
+                    match OutgoingStakingTransactionData::parse(&self.inner) {
+                        Ok(OutgoingStakingTransactionData::DeleteValidator) => {
                             PlainTransactionSenderData::DeleteValidator(raw_data)
                         }
-                        OutgoingStakingTransactionData::RemoveStake => {
+                        Ok(OutgoingStakingTransactionData::RemoveStake) => {
                             PlainTransactionSenderData::RemoveStake(raw_data)
                         }
+                        Err(_) => PlainTransactionSenderData::Raw(raw_data),
                     }
                 } else {
-                    PlainTransactionSenderData::Raw(PlainRawData { raw: raw_data.raw })
+                    PlainTransactionSenderData::Raw(raw_data)
                 }
             },
             data: {
+                // `Transaction::new` does not validate contract data, so unparseable
+                // bytes fall back to the raw representation rather than panicking.
+                let raw_recipient_data = || {
+                    PlainTransactionRecipientData::Raw(PlainRawData {
+                        raw: hex::encode(&self.inner.recipient_data),
+                    })
+                };
                 if self.inner.recipient_type == AccountType::Staking {
-                    // Parse transaction data
-                    StakingContract::parse_data(&self.inner.recipient_data).unwrap()
+                    StakingContract::parse_data(&self.inner.recipient_data)
+                        .unwrap_or_else(|_| raw_recipient_data())
                 } else if self.inner.recipient_type == AccountType::Vesting {
                     VestingContract::parse_data(
                         &self.inner.recipient_data,
@@ -504,7 +550,7 @@ impl Transaction {
                         genesis_block_number,
                         genesis_timestamp,
                     )
-                    .unwrap()
+                    .unwrap_or_else(|_| raw_recipient_data())
                 } else if self.inner.recipient_type == AccountType::HTLC {
                     HashedTimeLockedContract::parse_data(
                         &self.inner.recipient_data,
@@ -512,14 +558,19 @@ impl Transaction {
                         genesis_block_number,
                         genesis_timestamp,
                     )
-                    .unwrap()
+                    .unwrap_or_else(|_| raw_recipient_data())
                 } else {
-                    PlainTransactionRecipientData::Raw(PlainRawData {
-                        raw: hex::encode(self.recipient_data()),
-                    })
+                    raw_recipient_data()
                 }
             },
             proof: {
+                // `Transaction::new` does not validate the proof, so unparseable
+                // bytes fall back to the raw representation rather than panicking.
+                let raw_proof = || {
+                    PlainTransactionProof::Raw(PlainRawProof {
+                        raw: hex::encode(&self.inner.proof),
+                    })
+                };
                 if self.inner.proof.is_empty() {
                     PlainTransactionProof::Raw(PlainRawProof::default())
                 } else if self.inner.sender_type == AccountType::HTLC {
@@ -527,23 +578,22 @@ impl Transaction {
                         &self.inner.proof,
                         !self.inner.network_id.is_albatross(),
                     )
-                    .unwrap()
+                    .unwrap_or_else(|_| raw_proof())
                 } else {
                     // Depending on the network the signature proofs are constructed slightly differently.
                     let proof = if self.inner.network_id.is_albatross() {
-                        SignatureProof::deserialize(&self.inner.proof).unwrap()
+                        SignatureProof::deserialize(&self.inner.proof).ok()
                     } else {
-                        SignatureProof::from(
-                            PoWSignatureProof::deserialize_all(&self.inner.proof)
-                                .unwrap()
-                                .into_pos(),
-                        )
+                        PoWSignatureProof::deserialize_all(&self.inner.proof)
+                            .ok()
+                            .map(|pow| SignatureProof::from(pow.into_pos()))
                     };
-                    proof.to_plain_transaction_proof()
+                    proof
+                        .map(|proof| proof.to_plain_transaction_proof())
+                        .unwrap_or_else(raw_proof)
                 }
             },
             size: self.serialized_size(),
-            valid: self.verify(None).is_ok(),
         }
     }
 
@@ -572,6 +622,7 @@ impl Transaction {
                 PlainTransactionRecipientData::UpdateStaker(ref data) => &data.raw,
                 PlainTransactionRecipientData::SetActiveStake(ref data) => &data.raw,
                 PlainTransactionRecipientData::RetireStake(ref data) => &data.raw,
+                PlainTransactionRecipientData::SetSignalData(ref data) => &data.raw,
             })?),
             plain.value,
             plain.fee,
@@ -597,20 +648,18 @@ impl Transaction {
 #[repr(u8)]
 #[wasm_bindgen]
 pub enum TransactionFlag {
-    None,
-    ContractCreation,
-    Signaling,
+    None = 0,
+    ContractCreation = 1,
+    Signaling = 2,
 }
 
-impl TryFrom<u8> for TransactionFlag {
-    type Error = JsError;
-
-    fn try_from(value: u8) -> Result<Self, JsError> {
+impl From<u8> for TransactionFlag {
+    fn from(value: u8) -> Self {
         match value {
-            0 => Ok(TransactionFlag::None),
-            1 => Ok(TransactionFlag::ContractCreation),
-            2 => Ok(TransactionFlag::Signaling),
-            _ => Err(JsError::new("Invalid transaction flag")),
+            0 => TransactionFlag::None,
+            1 => TransactionFlag::ContractCreation,
+            2 => TransactionFlag::Signaling,
+            _ => TransactionFlag::None,
         }
     }
 }
@@ -647,6 +696,7 @@ pub enum PlainTransactionRecipientData {
     UpdateStaker(PlainUpdateStakerData),
     SetActiveStake(PlainSetActiveStakeData),
     RetireStake(PlainRetireStakeData),
+    SetSignalData(PlainSetSignalDataData),
 }
 
 impl<'a> serde::Deserialize<'a> for PlainTransactionRecipientData {
@@ -763,6 +813,31 @@ pub struct PlainRetireStakeData {
     pub retire_stake: u64,
 }
 
+/// Whether a set signal data (warm-key) transaction replaces the entire `signalData` field or
+/// only updates the protocol-version bytes (preserving the rest).
+#[derive(Clone, serde::Serialize, serde::Deserialize, Tsify)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlainSignalDataUpdateMode {
+    Full,
+    Version,
+}
+
+/// JSON-compatible and human-readable format of set signal data (warm-key) data.
+#[derive(Clone, serde::Serialize, serde::Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PlainSetSignalDataData {
+    pub raw: String,
+    pub validator: String,
+    /// Whether this transaction replaces the entire signal data (`full`) or only updates the
+    /// protocol-version bytes (`version`).
+    pub mode: PlainSignalDataUpdateMode,
+    /// For `full` mode: the new signal data as a hex string, or `null` to clear it. Always `null`
+    /// in `version` mode.
+    pub new_signal_data: Option<String>,
+    /// For `version` mode: the signaled protocol version; `null` in `full` mode.
+    pub version: Option<u16>,
+}
+
 /// Enum over all possible meanings of a transaction's proof.
 #[derive(Clone, serde::Serialize, Tsify)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -858,7 +933,7 @@ pub struct PlainTransaction {
     /// Basic transactions are simple value transfers between two regular address types and cannot contain
     /// any extra data. Basic transactions can be serialized to less bytes, so take up less place on the
     /// blockchain. Extended transactions on the other hand are all other transactions: contract creations
-    /// and interactions, staking transactions, transactions with exta data, etc.
+    /// and interactions, staking transactions, transactions with extra data, etc.
     #[tsify(type = "\"basic\" | \"extended\"")]
     pub format: TransactionFormat,
     /// The transaction's sender address in human-readable IBAN format.
@@ -903,9 +978,6 @@ pub struct PlainTransaction {
     /// The transaction's serialized size in bytes. It is used to determine the fee-per-byte that this
     /// transaction pays.
     pub size: usize,
-    /// Encodes if the transaction is valid, meaning the signature is valid and the `data` and `proof` fields
-    /// follow the correct format for the transaction's recipient and sender type, respectively.
-    pub valid: bool,
 }
 
 #[cfg(feature = "client")]
@@ -938,8 +1010,89 @@ impl PlainTransaction {
             }),
             proof: PlainTransactionProof::Raw(PlainRawProof::default()),
             size,
-            valid: true,
         }
+    }
+
+    fn from_historic_inherent(
+        hash: Blake2bHash,
+        network: NetworkId,
+        block_number: u32,
+        validator_address: nimiq_keys::Address,
+        raw_data: Vec<u8>,
+    ) -> PlainTransaction {
+        let size = raw_data.len();
+        PlainTransaction {
+            transaction_hash: hash.to_hex(),
+            format: TransactionFormat::Extended,
+            sender: Address::from(validator_address).to_plain(),
+            sender_type: AccountType::Basic,
+            recipient: Address::from(Policy::STAKING_CONTRACT_ADDRESS).to_plain(),
+            recipient_type: AccountType::Staking,
+            value: Coin::ZERO.into(),
+            fee: Coin::ZERO.into(),
+            fee_per_byte: 0.0,
+            validity_start_height: block_number,
+            network: network.to_string().to_lowercase(),
+            flags: 0,
+            sender_data: PlainTransactionSenderData::Raw(PlainRawData { raw: String::new() }),
+            data: PlainTransactionRecipientData::Raw(PlainRawData {
+                raw: hex::encode(raw_data),
+            }),
+            proof: PlainTransactionProof::Raw(PlainRawProof::default()),
+            size,
+        }
+    }
+
+    pub fn from_penalize_event(
+        ev: PenalizeEvent,
+        hash: Blake2bHash,
+        network: NetworkId,
+        block_number: u32,
+    ) -> PlainTransaction {
+        let validator_address = ev.validator_address.clone();
+        Self::from_historic_inherent(
+            hash,
+            network,
+            block_number,
+            validator_address,
+            ev.serialize_to_vec(),
+        )
+    }
+
+    pub fn from_jail_event(
+        ev: JailEvent,
+        hash: Blake2bHash,
+        network: NetworkId,
+        block_number: u32,
+    ) -> PlainTransaction {
+        let validator_address = ev.validator_address.clone();
+        Self::from_historic_inherent(
+            hash,
+            network,
+            block_number,
+            validator_address,
+            ev.serialize_to_vec(),
+        )
+    }
+
+    pub fn from_equivocation_event(
+        ev: EquivocationEvent,
+        hash: Blake2bHash,
+        network: NetworkId,
+        block_number: u32,
+    ) -> PlainTransaction {
+        let validator_address = match &ev.locator {
+            EquivocationLocator::Fork(locator) => locator.validator_address.clone(),
+            EquivocationLocator::DoubleProposal(locator) => locator.validator_address.clone(),
+            EquivocationLocator::DoubleVote(locator) => locator.validator_address.clone(),
+        };
+        Self::from_historic_inherent(
+            hash,
+            network,
+            block_number,
+            validator_address,
+            ev.serialize_to_vec(),
+        )
     }
 }
 
@@ -1019,7 +1172,6 @@ impl serde::Serialize for PlainTransactionDetails {
         plain.serialize_field("data", &self.transaction.data)?;
         plain.serialize_field("proof", &self.transaction.proof)?;
         plain.serialize_field("size", &self.transaction.size)?;
-        plain.serialize_field("valid", &self.transaction.valid)?;
 
         plain.serialize_field("state", &self.state)?;
         plain.serialize_field("executionResult", &self.execution_result)?;
@@ -1050,6 +1202,7 @@ impl PlainTransactionDetails {
             confirmations,
         }
     }
+
     /// Creates a PlainTransactionDetails struct that can be serialized to JS from a native [HistoricTransaction].
     pub fn try_from_historic_transaction(
         hist_tx: HistoricTransaction,
@@ -1059,6 +1212,7 @@ impl PlainTransactionDetails {
     ) -> Option<PlainTransactionDetails> {
         let block_number = hist_tx.block_number;
         let block_time = hist_tx.block_time;
+        let tx_hash = hist_tx.tx_hash().into();
 
         let state = if Policy::last_macro_block(current_block) >= block_number {
             TransactionState::Confirmed
@@ -1081,14 +1235,40 @@ impl PlainTransactionDetails {
                 true,
                 PlainTransaction::from_reward_event(
                     ev.clone(),
-                    hist_tx.tx_hash().into(),
+                    tx_hash,
                     hist_tx.network_id,
                     hist_tx.block_number,
                 ),
             ),
-            HistoricTransactionData::Penalize(_) => return None,
-            HistoricTransactionData::Jail(_) => return None,
-            HistoricTransactionData::Equivocation(_) => return None,
+            // Represent slash/equivocation inherents as synthetic plain transactions so
+            // historic lookups in WASM don't panic on `.expect("no non-reward inherent")`.
+            HistoricTransactionData::Penalize(ev) => (
+                true,
+                PlainTransaction::from_penalize_event(
+                    ev,
+                    tx_hash,
+                    hist_tx.network_id,
+                    hist_tx.block_number,
+                ),
+            ),
+            HistoricTransactionData::Jail(ev) => (
+                true,
+                PlainTransaction::from_jail_event(
+                    ev,
+                    tx_hash,
+                    hist_tx.network_id,
+                    hist_tx.block_number,
+                ),
+            ),
+            HistoricTransactionData::Equivocation(ev) => (
+                true,
+                PlainTransaction::from_equivocation_event(
+                    ev,
+                    tx_hash,
+                    hist_tx.network_id,
+                    hist_tx.block_number,
+                ),
+            ),
         };
 
         Some(PlainTransactionDetails {
@@ -1157,4 +1337,169 @@ extern "C" {
 extern "C" {
     #[wasm_bindgen(typescript_type = "PlainTransaction | string | Uint8Array")]
     pub type TransactionAnyType;
+}
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use nimiq_keys::Address;
+    use nimiq_primitives::{
+        coin::Coin,
+        networks::NetworkId::UnitAlbatross,
+        policy::{Policy, TEST_POLICY},
+    };
+    use nimiq_transaction::{
+        historic_transaction::{
+            EquivocationEvent, HistoricTransaction, HistoricTransactionData, JailEvent,
+            PenalizeEvent,
+        },
+        EquivocationLocator, ForkLocator, TransactionFlags,
+    };
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{PlainTransactionDetails, Transaction, TransactionFlag};
+
+    fn make_penalize_historic_tx() -> HistoricTransaction {
+        HistoricTransaction {
+            network_id: UnitAlbatross,
+            block_number: 100,
+            block_time: 1000,
+            data: HistoricTransactionData::Penalize(PenalizeEvent {
+                validator_address: Address::default(),
+                slot: 0,
+                offense_event_block: 50,
+            }),
+        }
+    }
+
+    fn make_jail_historic_tx() -> HistoricTransaction {
+        HistoricTransaction {
+            network_id: UnitAlbatross,
+            block_number: 100,
+            block_time: 1000,
+            data: HistoricTransactionData::Jail(JailEvent {
+                validator_address: Address::default(),
+                slots: 0..10,
+                offense_event_block: 50,
+                new_epoch_slot_range: None,
+            }),
+        }
+    }
+
+    fn make_equivocation_historic_tx() -> HistoricTransaction {
+        HistoricTransaction {
+            network_id: UnitAlbatross,
+            block_number: 100,
+            block_time: 1000,
+            data: HistoricTransactionData::Equivocation(EquivocationEvent {
+                locator: EquivocationLocator::Fork(ForkLocator {
+                    validator_address: Address::default(),
+                    block_number: 50,
+                }),
+            }),
+        }
+    }
+
+    fn tx_with_flags(flags: TransactionFlags) -> Transaction {
+        let mut inner = nimiq_transaction::Transaction::new_basic(
+            Address::from([1u8; Address::SIZE]),
+            Address::from([2u8; Address::SIZE]),
+            Coin::from_u64_unchecked(100),
+            Coin::from_u64_unchecked(0),
+            1,
+            UnitAlbatross,
+        );
+        inner.flags = flags;
+        Transaction::from(inner)
+    }
+
+    #[test]
+    fn penalize_inherent_does_not_panic_on_conversion() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+        let hist_tx = make_penalize_historic_tx();
+        let current_block = Policy::genesis_block_number() + 1;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PlainTransactionDetails::try_from_historic_transaction(
+                hist_tx,
+                current_block,
+                None,
+                None,
+            )
+            .expect("no non-reward inherent")
+        }));
+
+        outcome.expect(
+            "Penalize inherent should be convertible to PlainTransactionDetails, \
+             not cause a panic via .expect() on None",
+        );
+    }
+
+    #[test]
+    fn jail_inherent_does_not_panic_on_conversion() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+        let hist_tx = make_jail_historic_tx();
+        let current_block = Policy::genesis_block_number() + 1;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PlainTransactionDetails::try_from_historic_transaction(
+                hist_tx,
+                current_block,
+                None,
+                None,
+            )
+            .expect("no non-reward inherent")
+        }));
+
+        outcome.expect(
+            "Jail inherent should be convertible to PlainTransactionDetails, \
+             not cause a panic via .expect() on None",
+        );
+    }
+
+    #[test]
+    fn equivocation_inherent_does_not_panic_on_conversion() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+        let hist_tx = make_equivocation_historic_tx();
+        let current_block = Policy::genesis_block_number() + 1;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PlainTransactionDetails::try_from_historic_transaction(
+                hist_tx,
+                current_block,
+                None,
+                None,
+            )
+            .expect("no non-reward inherent")
+        }));
+
+        outcome.expect(
+            "Equivocation inherent should be convertible to PlainTransactionDetails, \
+             not cause a panic via .expect() on None",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn flags_getter_maps_every_bit_combination() {
+        let none = tx_with_flags(TransactionFlags::empty());
+        assert!(matches!(none.flags(), TransactionFlag::None));
+
+        let creation = tx_with_flags(TransactionFlags::CONTRACT_CREATION);
+        assert!(matches!(
+            creation.flags(),
+            TransactionFlag::ContractCreation
+        ));
+
+        let signaling = tx_with_flags(TransactionFlags::SIGNALING);
+        assert!(matches!(signaling.flags(), TransactionFlag::Signaling));
+
+        let invalid_bits = tx_with_flags(TransactionFlags::from_bits(0b11).unwrap());
+        assert!(matches!(invalid_bits.flags(), TransactionFlag::None));
+    }
+
+    #[wasm_bindgen_test]
+    fn to_plain_transaction_does_not_panic_for_combined_flags() {
+        let tx = tx_with_flags(TransactionFlags::from_bits(0b11).unwrap());
+        let plain = tx.to_plain_transaction(None, None);
+        assert_eq!(plain.flags, 0b11);
+    }
 }

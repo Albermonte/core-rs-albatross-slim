@@ -48,10 +48,14 @@ impl ValidityStore {
     ) -> bool {
         let txn = txn_option.or_new(&self.db);
 
-        // Calculate first block in window.
-        let validity_window_start = self
-            .last_bn(&txn)
-            .saturating_sub(Policy::transaction_validity_window_blocks());
+        // Equivalently, at the current block height, `Transaction::is_valid_at` accepts any
+        // transaction whose `validity_start_height` is in
+        // `[current_block_height - validity_window_blocks + 1, current_block_height + blocks_per_batch]`.
+        // A transaction first included in the earliest valid block must therefore stay protected
+        // against replays for `validity_window_blocks + blocks_per_batch` blocks.
+        let lookback =
+            Policy::transaction_validity_window_blocks().saturating_add(Policy::blocks_per_batch());
+        let validity_window_start = self.last_bn(&txn).saturating_sub(lookback);
 
         // If the vector is empty then we have never seen a transaction with this hash.
         let block_number = txn.get(&self.txn_hashes, raw_tx_hash);
@@ -94,15 +98,15 @@ impl ValidityStore {
     }
 
     /// Delete the transactions associated to the given block number
+    ///
+    /// Also reached when a rebranch reverts the newest block, which may be the only one tracked
+    /// (right after genesis or a fresh sync). An emptied store is harmless — `first_bn`/`last_bn`
+    /// fall back to 0 and `update_validity_store` repopulates it with the next block.
     pub(crate) fn delete_block_transactions(
         &self,
         db_txn: &mut MdbxWriteTransaction,
         block_number: u32,
     ) {
-        if self.first_bn(db_txn) == self.last_bn(db_txn) {
-            return;
-        }
-
         log::trace!(bn = block_number, "Deleting block from validity store");
 
         let cursor = WriteTransaction::dup_cursor(db_txn, &self.block_txns);

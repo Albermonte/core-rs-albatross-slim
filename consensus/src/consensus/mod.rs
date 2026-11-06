@@ -25,10 +25,8 @@ use nimiq_blockchain_proxy::BlockchainProxy;
 use nimiq_blockchain_proxy::BlockchainReadProxy;
 use nimiq_hash::Blake2bHash;
 use nimiq_network_interface::{network::Network, request::request_handler};
-use nimiq_primitives::policy::Policy;
 use nimiq_time::{interval, Interval};
 use nimiq_utils::{spawn, WakerExt};
-use nimiq_zkp_component::zkp_component::ZKPComponentProxy;
 use tokio::sync::{
     broadcast,
     mpsc::{self, error::SendError},
@@ -177,9 +175,24 @@ pub struct Consensus<N: Network> {
         mpsc::Receiver<ConsensusRequest<N>>,
     ),
 
-    zkp_proxy: ZKPComponentProxy<N>,
-
     waker: Option<Waker>,
+}
+
+/// Decides whether a finished head request provides enough evidence to establish
+/// consensus. We want at least 2/3 of the peers that responded to report a head
+/// block we already know, which is expressed as `num_known >= 2 * num_unknown`.
+///
+/// We must additionally have heard back from at least one peer. Failed head
+/// requests are not counted, so an all-failed request yields `num_known == 0` and
+/// `num_unknown == 0`, which would otherwise satisfy the comparison vacuously and
+/// establish consensus on zero evidence. The only legitimate zero-response case is
+/// a lone seed node (`min_peers == 0`) with no peers to ask, whose head request
+/// over an empty peer set completes with `0`/`0`; that case is identified here by
+/// `num_agents == 0` (when `min_peers >= 1` the establishment check is only reached
+/// with `num_agents >= min_peers >= 1`, so this never masks a failed request).
+fn head_request_established(num_known: usize, num_unknown: usize, num_agents: usize) -> bool {
+    let num_responses = num_known + num_unknown;
+    (num_responses > 0 || num_agents == 0) && num_known >= 2 * num_unknown
 }
 
 impl<N: Network> Consensus<N> {
@@ -197,14 +210,12 @@ impl<N: Network> Consensus<N> {
         blockchain: BlockchainProxy,
         network: Arc<N>,
         syncer: SyncerProxy<N>,
-        zkp_proxy: ZKPComponentProxy<N>,
     ) -> Self {
         Self::new(
             blockchain,
             network,
             syncer,
             Self::MIN_PEERS_ESTABLISHED,
-            zkp_proxy,
             Arc::new(AtomicU32::new(0)),
         )
     }
@@ -214,7 +225,6 @@ impl<N: Network> Consensus<N> {
         network: Arc<N>,
         syncer: SyncerProxy<N>,
         min_peers: usize,
-        zkp_proxy: ZKPComponentProxy<N>,
         syncer_tracker: Arc<AtomicU32>,
     ) -> Self {
         Self::init_network_request_receivers(&network, &blockchain);
@@ -254,7 +264,6 @@ impl<N: Network> Consensus<N> {
             min_peers,
             // Choose a small buffer as having a lot of items buffered here indicates a bigger problem.
             requests: mpsc::channel(10),
-            zkp_proxy,
             waker: None,
         }
     }
@@ -456,8 +465,14 @@ impl<N: Network> Consensus<N> {
                     // If we have a finished one, check its outcome.
                     if let Some(head_request) = finished_head_request {
                         debug!("Trying to establish consensus, checking head request ({} known, {} unknown).", head_request.num_known_blocks, head_request.num_unknown_blocks);
-                        // We would like that 2/3 of our peers have a known state.
-                        if head_request.num_known_blocks >= 2 * head_request.num_unknown_blocks {
+                        // We would like that 2/3 of our peers have a known state, and
+                        // that at least one peer actually responded (see
+                        // `head_request_established`).
+                        if head_request_established(
+                            head_request.num_known_blocks,
+                            head_request.num_unknown_blocks,
+                            self.num_agents(),
+                        ) {
                             info!("Consensus established, 2/3 of heads known.");
                             self.established_flag.swap(true, Ordering::Release);
 
@@ -515,34 +530,6 @@ impl<N: Network> Consensus<N> {
 
         // Wake up the task such that we start working on the head request immediately.
         self.waker.wake();
-    }
-
-    /// Requests zkps from connected peers.
-    fn request_zkps(&self) {
-        match self.sync {
-            #[cfg(feature = "full")]
-            // The syncing process of the history node does guarantee we have the most recent zkp proof. Thus,
-            // we may request it to our peers. This ensures the latest zkp replication across the different node types.
-            SyncerProxy::History(_) => {
-                // Only request a proof when we are too far from the last election head.
-                // This avoids spam requests when the proof for the latest election block is still being generated.
-                if self.zkp_proxy.get_zkp_state().latest_block.block_number()
-                    < Policy::election_block_before(
-                        self.blockchain.read().election_head().block_number(),
-                    )
-                {
-                    self.zkp_proxy
-                        .request_zkp_from_peers(self.sync.peers(), false);
-                }
-            }
-            _ => {
-                // The Full and Light sync ensure the latest proof is already pushed, there is no need to
-                // eagerly request them.
-                // For Pico sync we avoid zkp overhead as much as possible. The zkp component will
-                // lazily store zkps propagated by the network. In the case of fall back to full sync,
-                // the latest proof is ensured by the syncing mechanism itself.
-            }
-        }
     }
 
     fn resolve_block(&mut self, request: ResolveBlockRequest<N>) {
@@ -638,10 +625,46 @@ impl<N: Network> Future for Consensus<N> {
         // Advance consensus and catch-up through head requests.
         if self.should_request_heads() {
             self.request_heads();
-            self.request_zkps();
         }
 
         self.waker.store_waker(cx);
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::head_request_established;
+
+    #[test]
+    fn all_failed_head_request_does_not_establish() {
+        // An all-failed head request yields 0 known / 0 unknown. With peers present
+        // (e.g. the default `min_peers = 3`) this must NOT establish consensus, even
+        // though `0 >= 2 * 0` holds: we have zero evidence about our peers' heads.
+        assert!(!head_request_established(0, 0, 3));
+        assert!(!head_request_established(0, 0, 1));
+    }
+
+    #[test]
+    fn lone_seed_node_establishes_on_empty_result() {
+        // A seed node configured with `min_peers = 0` and no peers issues a head
+        // request over an empty peer set, which completes with 0 known / 0 unknown.
+        // This is the sole legitimate zero-response case and must still establish.
+        assert!(head_request_established(0, 0, 0));
+    }
+
+    #[test]
+    fn establishes_when_two_thirds_of_heads_are_known() {
+        // 2/3 (or more) of the responding peers report a known head.
+        assert!(head_request_established(2, 1, 3));
+        assert!(head_request_established(4, 2, 6));
+        assert!(head_request_established(1, 0, 3));
+    }
+
+    #[test]
+    fn does_not_establish_below_two_thirds_known() {
+        // Fewer than 2/3 of the responding peers report a known head.
+        assert!(!head_request_established(1, 1, 3));
+        assert!(!head_request_established(2, 3, 5));
     }
 }

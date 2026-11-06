@@ -8,6 +8,7 @@ pub mod subcommands;
 use crate::subcommands::*;
 
 #[derive(Debug, Parser)]
+#[command(name = "nimiq-rpc", version = nimiq_utils::CARGO_VERSION)]
 struct Opt {
     #[clap(short)]
     url: Option<String>,
@@ -53,10 +54,6 @@ enum Command {
     /// These operations only work if the current client is configured as a validator.
     #[clap(flatten)]
     Validator(ValidatorCommand),
-
-    /// Shows the zkp information.
-    #[clap(flatten)]
-    Zkp(ZKPComponentCommand),
 }
 
 impl Command {
@@ -69,7 +66,6 @@ impl Command {
             Command::Network(command) => command.handle_subcommand(client).await,
             Command::Mempool(command) => command.handle_subcommand(client).await,
             Command::Validator(command) => command.handle_subcommand(client).await,
-            Command::Zkp(command) => command.handle_subcommand(client).await,
         }
     }
 }

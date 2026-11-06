@@ -15,9 +15,9 @@ use nimiq_keys::{Address, KeyPair};
 use nimiq_network_interface::{
     network::Network as NetworkInterface,
     peer_info::{PeerInfo, Services},
+    validator_record::ValidatorRecord,
 };
 use nimiq_utils::tagged_signing::{TaggedKeyPair, TaggedSignable, TaggedSignature};
-use nimiq_validator_network::validator_record::ValidatorRecord;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -275,7 +275,9 @@ impl PeerContactInfo {
     pub fn exceeds_age(&self, max_age: Duration, unix_time: Duration) -> bool {
         unix_time
             .checked_sub(Duration::from_secs(self.contact.inner.timestamp()))
-            .is_some_and(|age| age > max_age)
+            // Future timestamps (checked_sub returns None) are treated as exceeded
+            // to prevent immortal entries from untrusted peers.
+            .is_none_or(|age| age > max_age)
     }
 
     /// Returns true if the services provided are interesting to me
@@ -369,14 +371,16 @@ impl PeerContactBook {
         let info = PeerContactInfo::from(contact);
         let peer_id = info.peer_id;
 
+        // Reject contacts with timestamps in the future
+        if info.contact().timestamp > current_ts {
+            return;
+        }
+
         match self.peer_contacts.entry(peer_id) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let entry_value = entry.get_mut();
-                // Only update the contact if the timestamp is greater than the entry we have for this peer
-                // and if the timestamp of the peer contact is not in the future
-                if entry_value.contact().timestamp < info.contact().timestamp
-                    && info.contact().timestamp <= current_ts
-                {
+                // Only update the contact if the timestamp is greater than the entry we have
+                if entry_value.contact().timestamp < info.contact().timestamp {
                     *entry_value = Arc::new(info);
                 }
             }
@@ -423,21 +427,40 @@ impl PeerContactBook {
             }
         }
 
-        // TODO Check peer contact timestamp
-        //  Call `insert()` here instead?
+        let current_ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Reject contacts with timestamps in the future
+        if info.contact().timestamp > current_ts {
+            return;
+        }
+
+        // Rejects contacts that are older than the allowed age
+        if info.exceeds_age(
+            Duration::from_secs(PeerContactBook::MAX_PEER_AGE),
+            Duration::from_secs(current_ts),
+        ) {
+            return;
+        }
 
         let info = Arc::new(info);
-        let is_new = self
-            .peer_contacts
-            .insert(info.peer_id, Arc::clone(&info))
-            .is_none();
-        if is_new {
-            log::trace!(
-                peer_id = %info.peer_id,
-                services = ?info.services(),
-                addresses = ?info.contact.inner.addresses,
-                "Adding peer contact",
-            );
+        match self.peer_contacts.entry(info.peer_id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().contact().timestamp < info.contact().timestamp {
+                    entry.insert(info);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                log::trace!(
+                    peer_id = %info.peer_id,
+                    services = ?info.services(),
+                    addresses = ?info.contact.inner.addresses,
+                    "Adding peer contact",
+                );
+                entry.insert(info);
+            }
         }
     }
 
@@ -489,20 +512,12 @@ impl PeerContactBook {
     pub fn known_peers(&self) -> Vec<(PeerId, PeerInfo)> {
         self.peer_contacts
             .iter()
-            .map(|(peer_id, contact)| {
-                (
+            .filter_map(|(peer_id, contact)| {
+                let address = contact.contact.inner.addresses.first()?.clone();
+                Some((
                     *peer_id,
-                    PeerInfo::new(
-                        contact
-                            .contact
-                            .inner
-                            .addresses
-                            .first()
-                            .expect("every peer should have at least one address")
-                            .clone(),
-                        contact.contact.inner.services,
-                    ),
-                )
+                    PeerInfo::new(address, contact.contact.inner.services),
+                ))
             })
             .collect()
     }
@@ -512,7 +527,7 @@ impl PeerContactBook {
     pub fn query(&self, services: Services) -> impl Iterator<Item = Arc<PeerContactInfo>> + '_ {
         // TODO: This is a naive implementation
         // TODO: Sort by score?
-        self.peer_contacts.iter().filter_map(move |(_, contact)| {
+        self.peer_contacts.values().filter_map(move |contact| {
             if contact.matches(services) {
                 Some(Arc::clone(contact))
             } else {

@@ -49,6 +49,8 @@ pub enum BlockError {
     BodyHashMismatch,
     #[error("Accounts hash mismatch")]
     AccountsHashMismatch,
+    #[error("Diff root mismatch")]
+    DiffRootMismatch,
     #[error("Invalid history root")]
     InvalidHistoryRoot,
 
@@ -84,9 +86,18 @@ pub enum BlockError {
     #[error("Incorrect validators")]
     InvalidValidators,
 
+    #[error("Invalid punished set")]
+    InvalidPunishedSet,
+
     #[error("Incorrect reward transactions")]
     InvalidRewardTransactions,
 
+    #[error("Version upgrade lacks sufficient support")]
+    InvalidVersionUpgrade,
+
     #[error("Skip block contains a non empty body")]
     InvalidSkipBlockBody,
+
+    #[error("Transaction fee sum overflow")]
+    TransactionFeeOverflow,
 }

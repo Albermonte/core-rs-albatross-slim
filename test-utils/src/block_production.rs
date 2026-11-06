@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use nimiq_block::{
-    Block, MacroBlock, MacroBody, MacroHeader, MultiSignature, SignedSkipBlockInfo, SkipBlockInfo,
-    SkipBlockProof, TendermintProof,
+    Block, MacroBlock, MacroBody, MacroHeader, MultiSignature, SkipBlockInfo, SkipBlockProof,
+    TendermintProof,
 };
 use nimiq_blockchain::{BlockProducer, Blockchain, BlockchainConfig};
 use nimiq_blockchain_interface::{
@@ -13,7 +13,7 @@ use nimiq_bls::{
 };
 use nimiq_collections::BitSet;
 use nimiq_database::{mdbx::MdbxDatabase, traits::WriteTransaction};
-use nimiq_genesis::NetworkId;
+use nimiq_genesis::{NetworkId, NetworkInfo};
 use nimiq_hash::Blake2sHash;
 use nimiq_keys::{KeyPair as SchnorrKeyPair, PrivateKey as SchnorrPrivateKey};
 use nimiq_primitives::{
@@ -61,16 +61,25 @@ impl TemporaryBlockProducer {
         producer
     }
 
+    /// Creates the temporary block producer with the unit tests default version of 1.
     pub fn new_merged() -> Self {
+        Self::new_merged_with_protocol_version(unit_genesis_block().version())
+    }
+
+    pub fn new_merged_with_protocol_version(initial_protocol_version: u16) -> Self {
         let time = Arc::new(OffsetTime::new());
         let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
         let pre_genesis_env = MdbxDatabase::new_volatile(Default::default()).unwrap();
-        let blockchain = Blockchain::new_merged(
+        let (genesis_block, genesis_accounts) =
+            unit_genesis_with_protocol_version(initial_protocol_version);
+        let blockchain = Blockchain::with_genesis_merged(
             env,
             Some(pre_genesis_env),
             BlockchainConfig::default(),
-            NetworkId::UnitAlbatross,
             time,
+            NetworkId::UnitAlbatross,
+            genesis_block,
+            genesis_accounts,
         )
         .unwrap();
 
@@ -78,13 +87,33 @@ impl TemporaryBlockProducer {
     }
 
     pub fn new() -> Self {
+        Self::new_with_protocol_version(unit_genesis_block().version())
+    }
+
+    pub fn new_with_protocol_version(initial_protocol_version: u16) -> Self {
+        Self::from_genesis(unit_genesis_with_protocol_version(initial_protocol_version))
+    }
+
+    /// Creates a temporary block producer whose genesis block is generated with the given timestamp
+    /// (ms since the unix epoch), so the head advances from that timestamp instead of the fixed
+    /// historical unit-genesis one. Useful for timing-sensitive tests; pass `now` for a live-like
+    /// chain. (The producer itself never consults the clock after genesis.)
+    pub fn new_with_genesis_timestamp(timestamp: u64) -> Self {
+        Self::from_genesis(unit_genesis_with_timestamp(timestamp))
+    }
+
+    fn from_genesis(
+        (genesis_block, genesis_accounts): (Block, Option<Vec<nimiq_primitives::trie::TrieItem>>),
+    ) -> Self {
         let time = Arc::new(OffsetTime::new());
         let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
-        let blockchain = Blockchain::new(
+        let blockchain = Blockchain::with_genesis(
             env,
             BlockchainConfig::default(),
-            NetworkId::UnitAlbatross,
             time,
+            NetworkId::UnitAlbatross,
+            genesis_block,
+            genesis_accounts,
         )
         .unwrap();
 
@@ -304,21 +333,26 @@ impl TemporaryBlockProducer {
             BlsSecretKey::deserialize_from_vec(&hex::decode(VOTING_KEY).unwrap()).unwrap(),
         );
 
-        let skip_block_info = {
+        let (skip_block_info, state_root, protocol_version) = {
             let blockchain = self.blockchain.read();
-            SkipBlockInfo {
+            let skip_block_info = SkipBlockInfo {
                 network_id: blockchain.network_id,
                 block_number: blockchain.block_number() + 1,
                 vrf_entropy: blockchain.head().seed().entropy(),
-            }
+            };
+            (
+                skip_block_info,
+                blockchain
+                    .next_skip_block_state_root()
+                    .expect("Accounts trie must be complete to compute the skip block state root"),
+                blockchain.state().current_version(),
+            )
         };
 
-        // create signed skip block information
-        let skip_block_info =
-            SignedSkipBlockInfo::from_message(skip_block_info, &keypair.secret_key, 0);
-
-        let signature = AggregateSignature::from_signatures(&[skip_block_info
-            .signature
+        // Sign the (possibly state-root bound) skip block message.
+        let signature = AggregateSignature::from_signatures(&[keypair
+            .secret_key
+            .sign_hash(skip_block_info.signing_hash(&state_root, protocol_version))
             .multiply(Policy::SLOTS)]);
         let mut signers = BitSet::new();
         for i in 0..Policy::SLOTS {
@@ -329,5 +363,72 @@ impl TemporaryBlockProducer {
         SkipBlockProof {
             sig: MultiSignature::new(signature, signers),
         }
+    }
+}
+
+/// Creates the temporary block producer with the unit tests default version of 1.
+fn unit_genesis_block() -> Block {
+    NetworkInfo::from_network_id(NetworkId::UnitAlbatross).genesis_block()
+}
+
+/// Builds the unit-genesis block with `patch` applied to its header (e.g. version or timestamp),
+/// rehashing afterwards. Accounts and state root are unchanged.
+fn unit_genesis_patched(
+    patch: impl FnOnce(&mut MacroHeader),
+) -> (Block, Option<Vec<nimiq_primitives::trie::TrieItem>>) {
+    let network_info = NetworkInfo::from_network_id(NetworkId::UnitAlbatross);
+
+    let mut genesis_block = network_info.genesis_block();
+    let header = &mut genesis_block.unwrap_macro_ref_mut().header;
+    patch(header);
+    header.cached_hash = None;
+    let genesis_hash = header.hash();
+    genesis_block.populate_cached_hash(genesis_hash);
+
+    (genesis_block, network_info.genesis_accounts())
+}
+
+fn unit_genesis_with_protocol_version(
+    initial_protocol_version: u16,
+) -> (Block, Option<Vec<nimiq_primitives::trie::TrieItem>>) {
+    assert!(
+        initial_protocol_version <= Policy::max_supported_version(),
+        "initial protocol version {} exceeds max supported version {}",
+        initial_protocol_version,
+        Policy::max_supported_version(),
+    );
+    unit_genesis_patched(|header| header.version = initial_protocol_version)
+}
+
+/// Overrides the genesis timestamp (ms since the unix epoch) instead of the protocol version.
+fn unit_genesis_with_timestamp(
+    timestamp: u64,
+) -> (Block, Option<Vec<nimiq_primitives::trie::TrieItem>>) {
+    unit_genesis_patched(|header| header.timestamp = timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+    use nimiq_primitives::policy::TEST_POLICY;
+
+    use super::*;
+
+    #[test]
+    fn can_create_blockchain_with_custom_initial_protocol_version() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+        let producer = TemporaryBlockProducer::new_with_protocol_version(3);
+
+        assert_eq!(producer.blockchain.read().protocol_version(), 3);
+        assert_eq!(producer.blockchain.read().head().version(), 3);
+    }
+
+    #[test]
+    fn produces_blocks_with_custom_initial_protocol_version() {
+        let _ = Policy::get_or_init(TEST_POLICY);
+        let producer = TemporaryBlockProducer::new_with_protocol_version(3);
+
+        let block = producer.next_block_no_push(vec![], false);
+
+        assert_eq!(block.version(), 3);
     }
 }

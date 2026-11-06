@@ -11,7 +11,10 @@ use crate::{
 pub struct VestingContractVerifier;
 
 impl AccountTransactionVerification for VestingContractVerifier {
-    fn verify_incoming_transaction(transaction: &Transaction) -> Result<(), TransactionError> {
+    fn verify_incoming_transaction(
+        transaction: &Transaction,
+        _protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         assert_eq!(transaction.recipient_type, AccountType::Vesting);
 
         if !transaction
@@ -46,7 +49,10 @@ impl AccountTransactionVerification for VestingContractVerifier {
         }
     }
 
-    fn verify_outgoing_transaction(transaction: &Transaction) -> Result<(), TransactionError> {
+    fn verify_outgoing_transaction(
+        transaction: &Transaction,
+        _protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         assert_eq!(transaction.sender_type, AccountType::Vesting);
 
         if !transaction.sender_data.is_empty() {
@@ -72,6 +78,15 @@ impl AccountTransactionVerification for VestingContractVerifier {
         Ok(())
     }
 }
+
+/// Maximum allowed value for time-domain `u64` fields in vesting contract
+/// creation data, namely `start_time` (ms since epoch) and `time_step` (ms).
+///
+/// Matches JavaScript's `Number.MAX_SAFE_INTEGER` (2^53 − 1) so that values
+/// round-trip through f64 without precision loss, and keeps the arithmetic in
+/// `VestingContract::min_cap` well inside the representable range regardless
+/// of the other parameter values.
+pub const MAX_TIME_VALUE: u64 = Coin::MAX_SAFE_VALUE;
 
 /// Data used to create vesting contracts.
 ///
@@ -128,6 +143,9 @@ impl CreationTransactionData {
                 // Only step length: vest full amount at that time
                 let CreationTransactionData8 { owner, time_step } =
                     CreationTransactionData8::deserialize_all(data)?;
+                if time_step > MAX_TIME_VALUE {
+                    return Err(TransactionError::InvalidData);
+                }
                 CreationTransactionData {
                     owner,
                     start_time: 0,
@@ -143,6 +161,9 @@ impl CreationTransactionData {
                     time_step,
                     step_amount,
                 } = CreationTransactionData24::deserialize_all(data)?;
+                if start_time > MAX_TIME_VALUE || time_step > MAX_TIME_VALUE {
+                    return Err(TransactionError::InvalidData);
+                }
                 CreationTransactionData {
                     owner,
                     start_time,
@@ -159,6 +180,15 @@ impl CreationTransactionData {
                     step_amount,
                     total_amount,
                 } = CreationTransactionData32::deserialize_all(data)?;
+                if start_time > MAX_TIME_VALUE || time_step > MAX_TIME_VALUE {
+                    return Err(TransactionError::InvalidData);
+                }
+                if total_amount > tx_value {
+                    return Err(TransactionError::InvalidData);
+                }
+                if step_amount > total_amount {
+                    return Err(TransactionError::InvalidData);
+                }
                 CreationTransactionData {
                     owner,
                     start_time,

@@ -40,6 +40,9 @@ pub struct Mempool {
     /// Blockchain reference
     blockchain: Arc<RwLock<Blockchain>>,
 
+    /// Cached protocol version used for transaction verification.
+    protocol_version: Arc<RwLock<u16>>,
+
     /// The mempool state: the data structure where the transactions are stored
     pub(crate) state: Arc<RwLock<MempoolState>>,
 
@@ -63,15 +66,22 @@ impl Mempool {
     /// Default total size limit of control transactions in the mempool (bytes)
     pub const DEFAULT_CONTROL_SIZE_LIMIT: usize = 6_000_000;
 
+    /// Default maximum number of transactions per sender stored in the mempool
+    pub const DEFAULT_TX_PER_SENDER_LIMIT: usize = 1000;
+
     /// Creates a new mempool
     pub fn new(blockchain: Arc<RwLock<Blockchain>>, config: MempoolConfig) -> Self {
+        let protocol_version = blockchain.read().protocol_version();
         let state = Arc::new(RwLock::new(MempoolState::new(
             config.size_limit,
             config.control_size_limit,
+            config.tx_per_sender_limit,
+            protocol_version,
         )));
 
         Self {
             blockchain,
+            protocol_version: Arc::new(RwLock::new(protocol_version)),
             state: Arc::clone(&state),
             filter: Arc::new(RwLock::new(MempoolFilter::new(
                 config.filter_rules,
@@ -100,6 +110,7 @@ impl Mempool {
         // Create the executor for the Topic T
         let executor = MempoolExecutor::<N, T>::new(
             Arc::clone(&self.blockchain),
+            Arc::clone(&self.protocol_version),
             Arc::clone(&self.state),
             Arc::clone(&self.filter),
             Arc::clone(&network),
@@ -140,7 +151,7 @@ impl Mempool {
         let control_executor_handle = self.control_executor_handle.lock().await;
 
         if executor_handle.is_some() && control_executor_handle.is_some() {
-            // If we already have both executors running dont do anything
+            // If we already have both executors running don't do anything
             return;
         }
 
@@ -218,23 +229,33 @@ impl Mempool {
             return;
         }
 
-        // Unsubscribe to the network TX topic before killing the executor
-        network.unsubscribe::<TransactionTopic>().await.unwrap();
+        // Unsubscribe from the network TX topic before killing the executor
+        if let Err(error) = network.unsubscribe::<TransactionTopic>().await {
+            warn!(
+                topic = TransactionTopic::NAME,
+                %error,
+                "Failed to unsubscribe from topic"
+            );
+        }
 
         // Stop the executor
-        handle.take().expect("Expected an executor handle").abort();
+        if let Some(handle) = handle.take() {
+            handle.abort();
+        }
 
-        // Unsubscribe to the network control TX topic before killing the executor
-        network
-            .unsubscribe::<ControlTransactionTopic>()
-            .await
-            .unwrap();
+        // Unsubscribe from the network control TX topic before killing the control executor
+        if let Err(error) = network.unsubscribe::<ControlTransactionTopic>().await {
+            warn!(
+                topic = ControlTransactionTopic::NAME,
+                %error,
+                "Failed to unsubscribe from topic"
+            );
+        }
 
         // Stop the control executor
-        control_executor_handle
-            .take()
-            .expect("Expected a control executor handle")
-            .abort();
+        if let Some(handle) = control_executor_handle.take() {
+            handle.abort();
+        }
     }
 
     /// Stops the mempool executor without TX stream
@@ -388,6 +409,42 @@ impl Mempool {
         // Update all sender balances that were affected by the adopted blocks.
         // Remove the transactions that have become invalid.
         Mempool::recompute_sender_balances(affected_senders, &blockchain, &mut mempool_state);
+    }
+
+    /// After a protocol upgrade there might be transactions that are no longer valid because of new rules introduced by the
+    /// protocol upgrade.
+    /// This revalidates all transactions in the mempool and removes the ones that are no longer valid.
+    pub fn revalidate_transactions(&self) {
+        let blockchain = self.blockchain.read();
+        let mut state = self.state.write();
+        let protocol_version = blockchain.protocol_version();
+        let MempoolState {
+            regular_transactions,
+            control_transactions,
+            ..
+        } = &mut *state;
+
+        // Find transactions that no longer pass verification under the new protocol version.
+        let invalid: Vec<Blake2bHash> = regular_transactions
+            .transactions
+            .values_mut()
+            .chain(control_transactions.transactions.values_mut())
+            .filter_map(|tx| {
+                tx.reset_verification_state();
+                tx.verify_mut(tx.network_id, protocol_version)
+                    .err()
+                    .map(|_| tx.hash())
+            })
+            .collect();
+
+        // Remove them; `remove()` releases each sender's reserved balance and prunes empty sender state.
+        for hash in invalid {
+            state.remove(&blockchain, &hash, EvictionReason::Invalid);
+        }
+
+        // Every surviving transaction has now been verified under this version, so the cache may
+        // vouch for transactions carrying this version again.
+        state.verified_version = protocol_version;
     }
 
     /// Get the mempool into a consistent and up-to-date state.
@@ -575,6 +632,39 @@ impl Mempool {
         (txs, size)
     }
 
+    /// Puts transactions that were handed out for block building but never made it into a block
+    /// back into the mempool.
+    ///
+    /// `get_transactions_for_block*()` removes what it returns, so a block that then fails to be
+    /// produced would take those transactions with it even though nothing is wrong with them.
+    /// Transactions that are no longer applicable are silently dropped; they were verified when
+    /// they first entered the mempool, so only the state-dependent checks are repeated here.
+    ///
+    /// If the caller already holds a blockchain lock, it can be passed to this function to prevent
+    /// double-locking the blockchain.
+    pub fn return_transactions_locked(
+        &self,
+        blockchain: &Blockchain,
+        transactions: Vec<Transaction>,
+    ) {
+        let mut state = self.state.write();
+        let next_block_number = blockchain.block_number() + 1;
+
+        for tx in transactions {
+            let tx_hash = tx.hash();
+
+            if state.contains(&tx_hash)
+                || !tx.is_valid_at(next_block_number)
+                || blockchain.contains_tx_in_validity_window(&tx_hash.into(), None)
+            {
+                continue;
+            }
+
+            // Balance checks are performed within put().
+            state.put(blockchain, tx, TxPriority::Medium).ok();
+        }
+    }
+
     fn get_transactions_for_block_impl(
         transactions: &mut MempoolTransactions,
         max_bytes: usize,
@@ -621,15 +711,46 @@ impl Mempool {
         let blockchain = Arc::clone(&self.blockchain);
         let mempool_state = Arc::clone(&self.state);
         let filter = Arc::clone(&self.filter);
-        let network_id = blockchain.read().network_id;
+        let (network_id, protocol_version) = {
+            let blockchain = blockchain.read();
+            (blockchain.network_id, blockchain.protocol_version())
+        };
         verify_tx(
             transaction,
             blockchain,
+            protocol_version,
             network_id,
             &mempool_state,
             filter,
             tx_priority.unwrap_or(TxPriority::Medium),
         )
+    }
+
+    /// Returns the protocol version currently used for transaction verification.
+    pub fn protocol_version(&self) -> u16 {
+        *self.protocol_version.read()
+    }
+
+    /// Updates the protocol version used for transaction verification.
+    pub fn set_protocol_version(&self, protocol_version: u16) -> u16 {
+        let mut current_protocol_version = self.protocol_version.write();
+        let old_protocol_version = *current_protocol_version;
+        *current_protocol_version = protocol_version;
+        old_protocol_version
+    }
+
+    /// Synchronizes the protocol version used for transaction verification with the
+    /// current blockchain state. If the protocol version increased, all mempool
+    /// contents are revalidated under the new version's rules.
+    pub fn resync_protocol_version(&self) {
+        let protocol_version = self.blockchain.read().protocol_version();
+        if self.set_protocol_version(protocol_version) < protocol_version {
+            debug!(
+                version = protocol_version,
+                "Revalidating mempool transactions after protocol upgrade"
+            );
+            self.revalidate_transactions();
+        }
     }
 
     /// Checks whether a transaction has been filtered
@@ -693,11 +814,68 @@ impl Mempool {
 }
 
 impl TransactionVerificationCache for Mempool {
-    fn is_known(&self, tx_hash: &Blake2bHash) -> bool {
-        if let Some(state) = self.state.try_read() {
-            state.contains(tx_hash)
-        } else {
-            false
-        }
+    fn is_verified(&self, transaction: &Transaction, protocol_version: u16) -> bool {
+        let Some(state) = self.state.try_read() else {
+            return false;
+        };
+        // Only vouch for a transaction we actually verified under this protocol version. All
+        // entries are verified under `verified_version` (set at construction and after each
+        // revalidation), and the hash binds every field except the proof, so an equal hash plus
+        // an equal proof means the block's transaction is byte-identical to the verified one.
+        state.verified_version == protocol_version
+            && state
+                .get(&transaction.hash())
+                .is_some_and(|known| known.proof == transaction.proof)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nimiq_blockchain::BlockchainConfig;
+    use nimiq_database::mdbx::MdbxDatabase;
+    use nimiq_network_mock::MockHub;
+    use nimiq_primitives::networks::NetworkId;
+    use nimiq_test_log::test;
+    use nimiq_utils::time::OffsetTime;
+
+    use super::*;
+
+    /// Stopping the executors must not panic when unsubscribing from the transaction topics
+    /// fails (e.g. because the network is no longer connected), and the executors must still
+    /// be stopped.
+    #[test(tokio::test)]
+    async fn stop_executors_tolerates_unsubscribe_errors() {
+        let env = MdbxDatabase::new_volatile(Default::default()).unwrap();
+        let blockchain = Arc::new(RwLock::new(
+            Blockchain::new(
+                env,
+                BlockchainConfig::default(),
+                NetworkId::UnitAlbatross,
+                Arc::new(OffsetTime::new()),
+            )
+            .unwrap(),
+        ));
+        let mempool = Mempool::new(blockchain, MempoolConfig::default());
+
+        // Connect the mock network to a peer, so that disconnecting below changes its state.
+        let mut hub = MockHub::new();
+        let network = Arc::new(hub.new_network());
+        let peer = hub.new_network();
+        network.dial_mock(&peer);
+
+        mempool
+            .start_executors(Arc::clone(&network), None, None)
+            .await;
+        assert!(mempool.executor_handle.lock().await.is_some());
+        assert!(mempool.control_executor_handle.lock().await.is_some());
+
+        // Once disconnected, the mock network fails every unsubscribe with `NotConnected`.
+        network.disconnect();
+        assert!(network.unsubscribe::<TransactionTopic>().await.is_err());
+
+        mempool.stop_executors(Arc::clone(&network)).await;
+
+        assert!(mempool.executor_handle.lock().await.is_none());
+        assert!(mempool.control_executor_handle.lock().await.is_none());
     }
 }

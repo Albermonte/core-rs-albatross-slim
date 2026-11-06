@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Tendermint implementation for Nimiq's Albatross"
 homepage.workspace = true
 repository.workspace = true
@@ -16,9 +17,9 @@ workspace = true
 [dependencies]
 futures = { workspace = true }
 log = { workspace = true }
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"
-tokio = { version = "1.49", features = [
+tokio = { version = "1.52", features = [
     "macros",
     "rt-multi-thread",
     "tracing",
@@ -31,7 +32,7 @@ nimiq-time = { workspace = true }
 
 [dev-dependencies]
 nimiq-test-log = { workspace = true }
-tokio = { version = "1.49", features = [
+tokio = { version = "1.52", features = [
     "macros",
     "rt-multi-thread",
     "tracing",

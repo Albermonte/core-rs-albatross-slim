@@ -30,6 +30,9 @@ pub(crate) struct MempoolExecutor<N: Network, T: Topic + Unpin + Sync> {
     // Blockchain reference
     blockchain: Arc<RwLock<Blockchain>>,
 
+    // Cached protocol version, updated by the mempool task on protocol upgrades.
+    protocol_version: Arc<RwLock<u16>>,
+
     // The mempool state: the data structure where the transactions are stored
     state: Arc<RwLock<MempoolState>>,
 
@@ -55,6 +58,7 @@ pub(crate) struct MempoolExecutor<N: Network, T: Topic + Unpin + Sync> {
 impl<N: Network, T: Topic + Unpin + Sync> MempoolExecutor<N, T> {
     pub fn new(
         blockchain: Arc<RwLock<Blockchain>>,
+        protocol_version: Arc<RwLock<u16>>,
         state: Arc<RwLock<MempoolState>>,
         filter: Arc<RwLock<MempoolFilter>>,
         network: Arc<N>,
@@ -63,6 +67,7 @@ impl<N: Network, T: Topic + Unpin + Sync> MempoolExecutor<N, T> {
     ) -> Self {
         Self {
             blockchain: Arc::clone(&blockchain),
+            protocol_version,
             state,
             filter,
             network,
@@ -97,6 +102,7 @@ impl<N: Network, T: Topic + Unpin + Sync> Future for MempoolExecutor<N, T> {
             }
 
             let blockchain = Arc::clone(&self.blockchain);
+            let protocol_version = Arc::clone(&self.protocol_version);
             let mempool_state = Arc::clone(&self.state);
             let filter = Arc::clone(&self.filter);
             let network = Arc::clone(&self.network);
@@ -107,6 +113,7 @@ impl<N: Network, T: Topic + Unpin + Sync> Future for MempoolExecutor<N, T> {
                 let verify_tx_ret = verify_tx(
                     tx,
                     blockchain,
+                    *protocol_version.read(),
                     network_id,
                     &mempool_state,
                     filter,

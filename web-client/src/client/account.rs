@@ -172,7 +172,7 @@ impl From<&nimiq_account::Staker> for PlainStaker {
             inactive_from: staker.inactive_from,
             inactive_release: staker
                 .inactive_from
-                .map(Policy::block_after_reporting_window),
+                .map(Policy::block_after_collateral_lockup),
             retired_balance: staker.retired_balance.into(),
         }
     }
@@ -233,10 +233,34 @@ impl From<&nimiq_account::Validator> for PlainValidator {
             inactive_from: validator.inactive_from,
             inactive_release: validator
                 .inactive_from
-                .map(Policy::block_after_reporting_window),
+                .map(Policy::block_after_collateral_lockup),
             retired: validator.retired,
             jailed_from: validator.jailed_from,
             jailed_release: validator.jailed_from.map(Policy::block_after_jail),
+        }
+    }
+}
+
+/// JSON-compatible and human-readable format of a validator that is elected for the current
+/// epoch, together with the number of validator slots assigned to it.
+///
+/// Unlike {@link PlainValidator}, this reflects the slot distribution that was fixed at the most
+/// recent election block. The number of slots is the metric used on-chain to evaluate support for
+/// protocol upgrades.
+#[derive(serde::Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PlainElectedValidator {
+    /// The validator's address, in user-friendly format.
+    address: String,
+    /// The number of validator slots assigned to this validator in the current epoch.
+    num_slots: u16,
+}
+
+impl From<&nimiq_primitives::slots_allocation::Validator> for PlainElectedValidator {
+    fn from(validator: &nimiq_primitives::slots_allocation::Validator) -> PlainElectedValidator {
+        PlainElectedValidator {
+            address: validator.address.to_user_friendly_address(),
+            num_slots: validator.num_slots(),
         }
     }
 }
@@ -260,4 +284,7 @@ extern "C" {
 
     #[wasm_bindgen(typescript_type = "(PlainValidator | undefined)[]")]
     pub type PlainValidatorArrayType;
+
+    #[wasm_bindgen(typescript_type = "PlainElectedValidator[]")]
+    pub type PlainElectedValidatorArrayType;
 }

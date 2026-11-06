@@ -1,112 +1,14 @@
-use nimiq_block::Block;
+use nimiq_block::{Block, BlockError};
 use nimiq_blockchain_interface::{
     AbstractBlockchain, BlockchainEvent, ChainInfo, PushError, PushResult,
 };
 use nimiq_primitives::policy::Policy;
-use nimiq_zkp::{verify::verify, NanoProof, ZKP_VERIFYING_DATA};
 use parking_lot::RwLockUpgradableReadGuard;
 
 use crate::blockchain::LightBlockchain;
 
 /// Implements methods to sync a light node.
 impl LightBlockchain {
-    /// Syncs using a zero-knowledge proof. It receives an election block and a proof that there is
-    /// a valid chain between the genesis block and that block.
-    /// This brings the node from the genesis block all the way to the most recent election block.
-    /// It is the default way to sync for a light node.
-    ///
-    /// When we get a ZKP from the ZKP component, it is already verified.
-    /// We can then set the `trusted_proof` flag to avoid the additional verification.
-    pub fn push_zkp(
-        this: RwLockUpgradableReadGuard<Self>,
-        mut block: Block,
-        proof: NanoProof,
-        trusted_proof: bool,
-    ) -> Result<PushResult, PushError> {
-        // Must be an election block.
-        assert!(block.is_election());
-
-        let block_hash_blake2b = block.hash_cached();
-        let block_hash_blake2s = block.unwrap_macro_ref().hash_blake2s();
-
-        // Check if we already know this block.
-        if this
-            .chain_store
-            .get_chain_info(&block_hash_blake2b, false)
-            .is_ok()
-        {
-            return Ok(PushResult::Known);
-        }
-
-        if block.block_number() <= this.macro_head.block_number() {
-            return Ok(PushResult::Ignored);
-        }
-
-        // We expect blocks without body here. Defensively strip the block body as opposed to
-        // rejecting the block if the body is present as we can still push it just fine.
-        match block {
-            Block::Macro(ref mut block) => block.body = None,
-            Block::Micro(ref mut block) => block.body = None,
-        }
-
-        // Perform block intrinsic checks.
-        block.verify(this.network_id)?;
-
-        // Verify the zk proof.
-        if !trusted_proof {
-            let verify_result = verify(
-                this.genesis_block.unwrap_macro_ref().hash_blake2s(),
-                block_hash_blake2s,
-                proof,
-                &ZKP_VERIFYING_DATA,
-            );
-
-            if verify_result.is_err() || !verify_result.unwrap() {
-                return Err(PushError::InvalidZKP);
-            }
-        }
-
-        // At this point we know that the block is correct. We just have to push it.
-
-        // Upgrade the blockchain lock
-        let mut this = RwLockUpgradableReadGuard::upgrade(this);
-
-        // Create the chain info for the new block.
-        let chain_info = ChainInfo::new(block.clone(), true);
-
-        // Since it's a macro block, we have to clear the ChainStore. If we are syncing for the first
-        // time, this should be empty. But we clear it just in case it's not our first time.
-        this.chain_store
-            .clear_old_blocks(chain_info.head.block_number());
-
-        // Store the block chain info.
-        this.chain_store.put_chain_info(chain_info);
-
-        // Store the election block header.
-        this.chain_store
-            .put_election(block.unwrap_macro_ref().header.clone());
-
-        // Update the blockchain.
-        this.head = block.clone();
-
-        this.macro_head = block.clone().unwrap_macro();
-
-        this.election_head = block.clone().unwrap_macro();
-
-        this.current_validators = block.validators();
-
-        // We shouldn't log errors if there are no listeners.
-        this.notifier
-            .send(BlockchainEvent::Extended(block_hash_blake2b.clone()))
-            .ok();
-
-        this.notifier
-            .send(BlockchainEvent::EpochFinalized(block_hash_blake2b))
-            .ok();
-
-        Ok(PushResult::Extended)
-    }
-
     /// Pushes a macro block into the blockchain. This is used when we have already synced to the
     /// most recent election block and now need to push a checkpoint block.
     /// But this function is general enough to allow pushing any macro block (checkpoint or election)
@@ -137,7 +39,8 @@ impl LightBlockchain {
         }
 
         // Perform block intrinsic checks.
-        block.verify(this.network_id)?;
+        let max_timestamp = this.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        block.verify(this.network_id, max_timestamp)?;
 
         // Verify that the block is a valid macro successor to our current macro head.
         block.verify_macro_successor(&this.macro_head)?;
@@ -160,6 +63,8 @@ impl LightBlockchain {
         // Store the block chain info.
         this.chain_store.put_chain_info(chain_info);
 
+        let previous_version = this.current_version();
+
         // Update the blockchain.
         this.head = block.clone();
 
@@ -171,14 +76,29 @@ impl LightBlockchain {
 
         // If it's an election block, you have more steps.
         if block.is_election() {
-            this.election_head = block.unwrap_macro_ref().clone();
+            // Verify the hardcoded checkpoint (if any) against our own chain.
+            nimiq_genesis::verify_election_checkpoint(
+                this.network_id,
+                block.block_number(),
+                &block_hash,
+            );
 
+            let is_protocol_upgrade = block.version() > previous_version;
+            this.election_head = block.unwrap_macro_ref().clone();
             this.current_validators = block.validators();
 
             // Store the election block header.
             this.chain_store.put_election(block.unwrap_macro().header);
 
             // We shouldn't log errors if there are no listeners.
+            if is_protocol_upgrade {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        block_hash.clone(),
+                        this.current_version(),
+                    ))
+                    .ok();
+            }
             this.notifier
                 .send(BlockchainEvent::EpochFinalized(block_hash))
                 .ok();
@@ -220,7 +140,18 @@ impl LightBlockchain {
         }
 
         // Perform block intrinsic checks.
-        block.verify(this.network_id)?;
+        let max_timestamp = this.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        block.verify(this.network_id, max_timestamp)?;
+
+        // The pico path has no justification check (and thus no `verify_validators`), so check
+        // the elected voting keys explicitly. The election block is trusted on first use.
+        block.verify_voting_keys()?;
+
+        // The pico path never checks the VRF seed (it skips `verify_proposer`); an
+        // undecodable seed would otherwise panic in `VrfSeed::entropy` at proposer selection.
+        if block.unwrap_macro_ref().header.seed.try_entropy().is_none() {
+            return Err(PushError::InvalidBlock(BlockError::InvalidSeed));
+        }
 
         // Upgrade the blockchain lock
         let mut this = RwLockUpgradableReadGuard::upgrade(this);
@@ -235,6 +166,8 @@ impl LightBlockchain {
         // Store the block chain info.
         this.chain_store.put_chain_info(chain_info);
 
+        let previous_version = this.current_version();
+
         // Update the blockchain.
         this.head = block.clone();
 
@@ -244,18 +177,25 @@ impl LightBlockchain {
             .send(BlockchainEvent::Extended(block_hash.clone()))
             .ok();
 
+        let is_protocol_upgrade = block.version() > previous_version;
         this.election_head = block.unwrap_macro_ref().clone();
-
         this.current_validators = block.validators();
 
         // Store the election block header.
         this.chain_store.put_election(block.unwrap_macro().header);
 
         // We shouldn't log errors if there are no listeners.
+        if is_protocol_upgrade {
+            this.notifier
+                .send(BlockchainEvent::ProtocolUpgrade(
+                    block_hash.clone(),
+                    this.current_version(),
+                ))
+                .ok();
+        }
         this.notifier
             .send(BlockchainEvent::EpochFinalized(block_hash))
             .ok();
-
         Ok(PushResult::Extended)
     }
 }

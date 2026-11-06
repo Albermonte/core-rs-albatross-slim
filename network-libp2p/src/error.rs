@@ -7,6 +7,13 @@ pub enum NetworkError {
     #[error("Dial error: {0}")]
     Dial(#[from] libp2p::swarm::DialError),
 
+    #[error("Failed to listen on {address}")]
+    Listen {
+        address: libp2p::Multiaddr,
+        #[source]
+        error: libp2p::core::transport::TransportError<std::io::Error>,
+    },
+
     #[error("Failed to send action to swarm task")]
     Send,
 
@@ -24,6 +31,18 @@ pub enum NetworkError {
 
     #[error("DHT GetRecord error: {0:?}")]
     DhtGetRecord(libp2p::kad::GetRecordError),
+
+    #[error("DHT query finished without a verified record")]
+    DhtNoValidRecord,
+
+    #[error("DHT get query entered an inconsistent state")]
+    DhtGetInconsistentState,
+
+    #[error("DHT get record verification failed")]
+    DhtGetVerificationFailed,
+
+    #[error("DHT get query timed out")]
+    DhtGetTimeout,
 
     #[error("DHT PutRecord error: {0:?}")]
     DhtPutRecord(libp2p::kad::PutRecordError),

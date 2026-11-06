@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Nimiq Genesis configuration"
 homepage.workspace = true
 repository.workspace = true
@@ -22,6 +23,7 @@ workspace = true
 
 [dependencies]
 hex = "0.4"
+log = { workspace = true }
 serde = "1.0"
 url = "2.5"
 

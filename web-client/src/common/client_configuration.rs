@@ -98,7 +98,7 @@ impl Default for ClientConfiguration {
             peer_count_max: 50,
             peer_count_per_ip_max: 10,
             peer_count_per_subnet_max: 10,
-            sync_mode: "light".to_string(),
+            sync_mode: "pico".to_string(),
             num_initial_connections: 4,
             network_buffer_size: 1024,
         }
@@ -128,13 +128,17 @@ impl ClientConfiguration {
     /// Sets the list of seed nodes that are used to connect to the Nimiq Albatross network.
     ///
     /// Each array entry must be a proper Multiaddr format string.
+    ///
+    /// Throws when an entry cannot be deserialized as a string.
     #[wasm_bindgen(js_name = seedNodes)]
     #[allow(clippy::boxed_local)]
-    pub fn seed_nodes(&mut self, seeds: Box<[JsValue]>) {
+    pub fn seed_nodes(&mut self, seeds: Box<[JsValue]>) -> Result<(), JsError> {
         self.seed_nodes = seeds
             .iter()
-            .map(|seed| serde_wasm_bindgen::from_value(seed.clone()).unwrap())
-            .collect::<Vec<String>>();
+            .map(|seed| serde_wasm_bindgen::from_value::<String>(seed.clone()))
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(())
     }
 
     /// Sets the log level that is used when logging to the console.
@@ -191,9 +195,9 @@ impl ClientConfiguration {
         self.network_buffer_size = network_buffer_size;
     }
 
-    /// Sets the sync mode that shoud be used.
+    /// Sets the sync mode that should be used.
     /// Only "light" and "pico" are supported for web clients
-    /// Default is "light"
+    /// Default is "pico"
     #[wasm_bindgen(js_name = syncMode)]
     pub fn sync_mode(&mut self, sync_mode: String) {
         self.sync_mode = sync_mode.to_lowercase();

@@ -17,7 +17,7 @@ jobs:
         - test: ValidatorsStress
           devnet_args: -t .github/devnet_topologies/validators_stress.toml -R -k 2 -as -dt 30
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -26,7 +26,7 @@ jobs:
         tool-cache: true
         large-packages: false
     - name: Checkout testing branch
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         ref: iicruz/testing-tendermint-ci-fails
     - name: Verify branch
@@ -36,9 +36,9 @@ jobs:
           echo "Failed to checkout iicruz/testing-tendermint-ci-fails!"
           exit 1
         fi
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v7
       with:
-        python-version: '3.8'
+        python-version: '3.14'
     - name: Install python dependencies
       run: pip install scripts/devnet
     - name: Set up Rust toolchain
@@ -63,7 +63,7 @@ jobs:
       run: sed -i 's/url = "[^"]*"/url = "<redacted>"/g' temp-logs/*/conf/*/*.toml
     - name: Archive test results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: ${{ matrix.test }}-logs
           path: |

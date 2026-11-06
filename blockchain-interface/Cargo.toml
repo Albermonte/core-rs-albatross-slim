@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Generic blockchain structures"
 homepage.workspace = true
 repository.workspace = true
@@ -37,3 +38,7 @@ nimiq-primitives = { workspace = true, features = ["coin", "key-nibbles", "polic
 nimiq-serde = { workspace = true }
 nimiq-transaction = { workspace = true }
 nimiq-vrf = { workspace = true }
+
+[dev-dependencies]
+nimiq-keys = { workspace = true }
+nimiq-test-log = { workspace = true }

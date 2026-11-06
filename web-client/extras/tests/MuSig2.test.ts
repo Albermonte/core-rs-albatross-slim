@@ -4,6 +4,7 @@ import {
     CommitmentPair,
     KeyPair,
     PartialSignature,
+    Policy,
     PublicKey,
     SignatureProof,
     TransactionBuilder,
@@ -113,6 +114,22 @@ describe('MuSig2', async () => {
 
         // Verify that everything worked correctly
         expect(tx.toHex()).toEqual(_signed_transaction);
-        expect(() => tx.verify()).not.toThrow();
+        expect(() => tx.verify(Policy.MAX_SUPPORTED_VERSION, tx.networkId)).not.toThrow();
+    });
+
+    it('rejects empty public keys and commitment groups', () => {
+        expect(() => Commitment.sumMuSig2([], [], new Uint8Array(0)))
+            .toThrow('At least one public key must be provided');
+    });
+
+    it('rejects malformed commitment groups', () => {
+        const signer = KeyPair.generate();
+        const invalidGroup = [CommitmentPair.generate().commitment];
+
+        expect(() => Commitment.sumMuSig2(
+            [signer.publicKey],
+            [invalidGroup],
+            new Uint8Array(0),
+        )).toThrow('Number of commitments in each group must be 2');
     });
 });

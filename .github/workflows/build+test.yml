@@ -12,26 +12,26 @@ on:
 jobs:
 
   rustfmt:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@nightly
       with:
         components: rustfmt
     - run: cargo fmt --all -- --check
 
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.88.0 # Also test our Rust MSRV here.
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@1.94.1 # Also test our Rust MSRV here.
     - uses: Swatinem/rust-cache@v2
     - run: cargo check --all-features --tests --benches
 
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -39,7 +39,7 @@ jobs:
       with:
         tool-cache: true
         large-packages: false
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: "Check for duplicate message IDs"
       run: "! grep -rEoh --exclude-dir tests --exclude-dir target 'TYPE_ID: u16 = [^;]+;' | sort | uniq -d | grep '^'"
     - uses: dtolnay/rust-toolchain@stable
@@ -54,10 +54,10 @@ jobs:
     #- name: Remove possible stale artifacts
     #  run: cargo llvm-cov clean --workspace
     #- name: Run test with coverage instrumentation
-    #  run: cargo llvm-cov nextest --features=nimiq-zkp-component/test-prover
+    #  run: cargo llvm-cov nextest
       # Fixme: --doctest is not supported in stable. See:
       # https://github.com/taiki-e/cargo-llvm-cov/tree/7448e48b438797efb446a98ebd8ff22d3fae5ebe#known-limitations
-      # run: cargo llvm-cov --features=nimiq-zkp-component/test-prover --doctests
+      # run: cargo llvm-cov --doctests
     #- name: Generate coverage report
     #  run: cargo llvm-cov report --lcov --output-path coverage.lcov
     #- name: Upload coverage to Codecov
@@ -69,17 +69,17 @@ jobs:
     #    name: Nimiq code coverage
     #    verbose: true
     - name: Run tests
-      run: cargo nextest run --features=nimiq-zkp-component/test-prover
+      run: cargo nextest run
     # Currently `nextest` doesn't support doctest so we have to run them apart
     - name: Run doctest
       run: cargo test --doc
 
   clippy:
     if: github.event_name != 'push' || github.event.pusher.name != 'dependabot[bot]'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
@@ -91,7 +91,7 @@ jobs:
         args: --release --all-features
 
   web-client:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -108,7 +108,7 @@ jobs:
         haskell: true
         large-packages: false
         swap-storage: true
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - name: Install wasm-pack
@@ -118,7 +118,7 @@ jobs:
       run: wasm-pack test --chrome --headless
 
   web-client-lib:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -126,11 +126,23 @@ jobs:
       with:
         tool-cache: true
         large-packages: false
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
       with:
         targets: wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
+    - name: Resolve wasm-bindgen version from Cargo.lock
+      id: wasm-bindgen
+      run: |
+        VERSION=$(awk '
+          $0 == "name = \"wasm-bindgen\"" { found = 1; next }
+          found && /^version = / { gsub(/version = "|"/, ""); print; exit }
+        ' Cargo.lock)
+        if [ -z "$VERSION" ]; then echo "::error::Could not resolve wasm-bindgen version from Cargo.lock"; exit 1; fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-bindgen-cli@${{ steps.wasm-bindgen.outputs.version }}
     - name: Compile to wasm and generate bindings
       working-directory: ./web-client
       run: ./scripts/build.sh --only nodejs,types
@@ -145,13 +157,13 @@ jobs:
       run: yarn test
 
   reconnect-test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
       with:
-        python-version: '3.8'
+        python-version: '3.14'
     - name: Install python dependencies
       run: pip install scripts/devnet
     - name: Set up Rust toolchain
@@ -164,7 +176,7 @@ jobs:
           python3 scripts/devnet/devnet.py -t .github/devnet_topologies/four_validators.toml -r 1
     - name: Archive test results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: reconnect-test-logs
           path: |

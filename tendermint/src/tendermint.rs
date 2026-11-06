@@ -14,7 +14,7 @@ use futures::{
 use nimiq_collections::BitSet;
 use nimiq_time::{sleep, Sleep};
 use nimiq_utils::stream::{FuturesUnordered, SelectAll};
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use tokio::{sync::mpsc, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -89,6 +89,9 @@ pub struct Tendermint<TProtocol: Protocol> {
     /// Set once a decision was reached. The next call to poll will then return Poll::Ready(None)
     decision: bool,
 
+    /// Decision completed by a late proposal, returned on the next poll.
+    pending_decision: Option<TProtocol::Decision>,
+
     /// Used to dispatch messages to aggregations.
     pub(crate) aggregation_senders:
         BTreeMap<(u32, Step), mpsc::Sender<TProtocol::AggregationMessage>>,
@@ -121,6 +124,7 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
             future_round_verification: None,
             timeout: None,
             decision: false,
+            pending_decision: None,
             state_return_pending: false,
             pending_aggregation_starts: BTreeSet::default(),
         };
@@ -175,8 +179,8 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
 
     /// Test `proposal_hash` against the locked value in state using an optional `vr`.
     ///
-    /// Returns false if locked is set and the hash is *not* equal to `proposal_hash` and `vr` is not
-    /// more recent than the round this instance is locked on.
+    /// Returns false if locked is set and the hash is *not* equal to `proposal_hash` and `vr` is
+    /// older than the round this instance is locked on (or absent).
     ///
     /// Returns true otherwise.
     pub(crate) fn is_allowed_to_vote_on(
@@ -187,9 +191,11 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
         match &self.state.locked {
             // Always allowed to vote when not locked.
             None => true,
-            // If locked, only allowed to vote for it if it is the same hash, or vr is more recent.
+            // If locked, only allowed to vote for it if it is the same hash, or vr is at least as
+            // recent as the locked round (Tendermint paper, Algorithm 1 line 29:
+            // `lockedRound <= vr || lockedValue = v`).
             Some((locked_round, locked_hash)) => {
-                locked_hash == proposal_hash || Some(*locked_round) < vr
+                locked_hash == proposal_hash || Some(*locked_round) <= vr
             }
         }
     }
@@ -213,6 +219,44 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
                 }
             })
             .is_some()
+    }
+
+    /// Updates `valid` if `proposal_hash` forms a newer known prevote polka.
+    pub(crate) fn update_valid(&mut self, round: u32, proposal_hash: TProtocol::ProposalHash) {
+        if self.state.valid.is_none() || self.state.valid.as_ref().unwrap().0 < round {
+            self.state.valid = Some((round, proposal_hash));
+        }
+    }
+
+    /// Builds a decision from a known proposal and a conclusive precommit aggregation.
+    pub(crate) fn build_decision(
+        &self,
+        proposal: TProtocol::Proposal,
+        aggregation: TProtocol::Aggregation,
+        round: u32,
+    ) -> TProtocol::Decision {
+        let inherent = self
+            .state
+            .inherents
+            .get(&proposal.inherent_hash())
+            .expect("proposal inherent must be known");
+
+        self.protocol
+            .create_decision(proposal, inherent.clone(), aggregation, round)
+    }
+
+    /// Builds the decision for a known proposal if a cached precommit aggregation holds 2f+1
+    /// votes for it, regardless of the current round and step.
+    fn cached_decision(
+        &self,
+        proposal_hash: &TProtocol::ProposalHash,
+    ) -> Option<TProtocol::Decision> {
+        let ((round, _), aggregation) = self.state.best_votes.iter().find(|((_, step), agg)| {
+            *step == Step::Precommit
+                && agg.contributors_for(Some(proposal_hash)).len() >= TProtocol::TWO_F_PLUS_ONE
+        })?;
+        let proposal = self.state.known_proposals.get(proposal_hash)?.clone();
+        Some(self.build_decision(proposal, aggregation.clone(), *round))
     }
 
     /// Creates an aggregation for a given `id`. If that aggregation does already exist,
@@ -384,14 +428,28 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
         };
 
         // The proposal with `proposal_hash` was successfully verified. Add it to the set of proposals for its round.
+        let proposal_round = proposal.message.round;
         self.state
             .round_proposals
-            .entry(proposal.message.round)
+            .entry(proposal_round)
             .or_default()
             .insert(
                 proposal_hash.clone(),
                 (proposal.message.valid_round, proposal.signature),
             );
+
+        // The 2f+1 prevote polka for this proposal may have been observed before the proposal
+        // itself was known: the aggregate arrived first, so `poll_aggregations`/`aggregate` could
+        // not set `valid` (the proposal body was still unknown) and the node may since have advanced
+        // within the round (e.g. timed out into Precommit). Set it now.
+        if self.has_two_f_plus_one(&proposal_hash, proposal_round) {
+            self.update_valid(proposal_round, proposal_hash.clone());
+        }
+
+        // Likewise, a cached 2f+1 precommit polka for the proposal is conclusive now.
+        if let Some(decision) = self.cached_decision(&proposal_hash) {
+            self.pending_decision = Some(decision);
+        }
 
         // make sure the next poll will return a state update
         Some(proposal_hash)
@@ -457,6 +515,8 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
                             // Skip to that round
                             self.state.current_round = round;
                             self.state.current_step = Step::Propose;
+                            // Drop the abandoned round's timeout so the skipped-to round arms a fresh one.
+                            self.timeout = None;
                             self.future_contributions
                                 .retain(|&round, _contributors| round > self.state.current_round);
                             self.future_round_messages
@@ -586,7 +646,8 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
                 .or_insert_with(|| {
                     *should_export_state = true;
                     aggregate
-                });
+                })
+                .clone();
 
             // Get the total weight for the aggregate. It will be used for more comparisons later.
             let total_contributor_count = best_vote.all_contributors().len();
@@ -601,33 +662,16 @@ impl<TProtocol: Protocol> Tendermint<TProtocol> {
                                 // If it is an improvement over `valid`, replace it.
                                 // Note that this might happen for any given round. This instance might have already voted None.
                                 // Thus setting `valid` and setting `locked` happens in different places.
-                                if self.state.valid.is_none()
-                                    || self.state.valid.as_ref().unwrap().0 < round_and_step.0
-                                {
-                                    self.state.valid =
-                                        Some((round_and_step.0, proposal_hash.clone()));
-                                }
+                                self.update_valid(round_and_step.0, proposal_hash.clone());
                             }
                             Step::Precommit => {
                                 // The proposal exists and is valid. 2f+1 precommits have been seen.
                                 log::debug!(?round_and_step, "Aggregation produced decision value",);
-
-                                // Get the inherent
-                                let inherent = self
-                                    .state
-                                    .inherents
-                                    .get(&proposal.inherent_hash())
-                                    .expect("");
-
-                                // Produce a decision
-                                let decision = self.protocol.create_decision(
+                                return Some(self.build_decision(
                                     proposal.clone(),
-                                    inherent.clone(),
                                     best_vote.clone(),
                                     round_and_step.0,
-                                );
-
-                                return Some(decision);
+                                ));
                             }
                             _ => panic!("Aggregations must not have Step::Propose"),
                         };
@@ -721,6 +765,13 @@ impl<TProtocol: Protocol> Stream for Tendermint<TProtocol> {
             // Do nothing if the future ultimately resolved to None or Pending.
         }
 
+        // A late proposal (gossiped on the previous poll or requested) may have completed a
+        // cached precommit polka.
+        if let Some(decision) = self.pending_decision.take() {
+            self.decision = true;
+            return Poll::Ready(Some(Return::Decision(decision)));
+        }
+
         // Poll incoming level updates and dispatch to corresponding aggregations.
         // An incurred state change is a skip ahead to a future round, voting on in between aggregations as well.
         // In that case the step will be Step::Propose.
@@ -777,11 +828,15 @@ impl<TProtocol: Protocol> Stream for Tendermint<TProtocol> {
         };
 
         // If the state machine did not return Poll::Pending its return must be returned as it might be the result
-        if state_machine_return.is_some() {
-            if let Some(Return::Update(_)) = &state_machine_return {
-                self.state_return_pending = false;
+        if let Some(state_machine_return) = state_machine_return {
+            match &state_machine_return {
+                Return::Decision(_) => self.decision = true,
+                Return::Update(_) => self.state_return_pending = false,
+                Return::ProposalAccepted(_)
+                | Return::ProposalIgnored(_)
+                | Return::ProposalRejected(_) => {}
             }
-            return Poll::Ready(state_machine_return);
+            return Poll::Ready(Some(state_machine_return));
         }
 
         // If the state machine did return Poll::Pending there might have been a state change prior to it, that makes a state

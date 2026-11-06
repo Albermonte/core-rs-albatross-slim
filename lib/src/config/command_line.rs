@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::config::config_file::SyncMode;
 
 #[derive(Debug, Parser)]
+#[command(name = "nimiq-client", version = nimiq_utils::CARGO_VERSION)]
 pub struct CommandLine {
     /// Use a custom configuration file.
     ///
@@ -63,10 +64,6 @@ pub struct CommandLine {
     ///
     #[clap(long)]
     pub network: Option<NetworkId>,
-
-    /// Internally used flag to start a zero-knowledge prover process.
-    #[clap(long, action)]
-    pub prove: bool,
 }
 
 impl CommandLine {

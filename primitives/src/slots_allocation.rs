@@ -14,17 +14,33 @@
 //!                      |             SlotBand                      |    SlotBand       |
 //!                      +-------------------------------------------+-------------------+
 //! ```
-use std::{cmp::Ordering, collections::BTreeMap, ops::Range, slice::Iter};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    ops::Range,
+    slice::Iter,
+};
 
-use ark_ec::CurveGroup;
-use ark_serialize::CanonicalSerialize;
 use nimiq_bls::{G2Projective, LazyPublicKey as LazyBlsPublicKey, PublicKey as BlsPublicKey};
-use nimiq_hash::{Hash, HashOutput};
+use nimiq_hash::{Hash, HashOutput, Hasher};
 use nimiq_keys::{Address, Ed25519PublicKey as SchnorrPublicKey};
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{merkle_tree::merkle_tree_construct, policy::Policy};
+
+/// Error returned when a validator has an invalid BLS voting key that cannot be decompressed.
+#[derive(Clone, Debug)]
+pub struct InvalidValidatorsError;
+
+impl fmt::Display for InvalidValidatorsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Invalid BLS voting key for validator")
+    }
+}
+
+impl std::error::Error for InvalidValidatorsError {}
 
 /// This is the depth of the PKTree circuit.
 pub const PK_TREE_DEPTH: usize = 5;
@@ -167,12 +183,9 @@ impl Validators {
         &self.validators[self.get_band_from_slot(slot_number) as usize]
     }
 
-    /// Returns the validator given the slot band.
-    ///
-    /// ## Panic
-    /// This function requires the slot_band to be within bounds. If it is not this function will panic.
-    pub fn get_validator_by_slot_band(&self, slot_band: u16) -> &Validator {
-        &self.validators[slot_band as usize]
+    /// Returns the validator given the slot band, if it exists.
+    pub fn get_validator_by_slot_band(&self, slot_band: u16) -> Option<&Validator> {
+        self.validators.get(slot_band as usize)
     }
 
     /// Returns the validator given its address, if it exists.
@@ -187,25 +200,116 @@ impl Validators {
     }
 
     /// Returns the G2 projective associated with each slot, in order.
-    pub fn voting_keys_g2(&self) -> Vec<G2Projective> {
-        self.voting_keys().iter().map(|pk| pk.public_key).collect()
+    pub fn voting_keys_g2(&self) -> Result<Vec<G2Projective>, InvalidValidatorsError> {
+        Ok(self.voting_keys()?.iter().map(|pk| pk.public_key).collect())
     }
 
     /// Returns the voting key associated with each slot, in order.
-    pub fn voting_keys(&self) -> Vec<BlsPublicKey> {
+    pub fn voting_keys(&self) -> Result<Vec<BlsPublicKey>, InvalidValidatorsError> {
         let mut pks = vec![];
 
         for validator in self.iter() {
-            let pk = *validator.voting_key.uncompress().unwrap();
+            let pk = *validator
+                .voting_key
+                .uncompress()
+                .ok_or(InvalidValidatorsError)?;
             pks.append(&mut vec![pk; validator.num_slots() as usize]);
         }
 
-        pks
+        Ok(pks)
+    }
+
+    /// Checks that the validator set structure is valid. Unlike `validate_keys`,
+    /// this doesn't decompress the voting keys, so it is cheap enough for untrusted sets.
+    pub fn validate_structure(&self) -> Result<(), InvalidValidatorsError> {
+        let mut total_slots: u16 = 0;
+        let mut seen_addresses = BTreeSet::new();
+
+        for validator in self.iter() {
+            // Bands must be contiguous from 0 and non-empty. Gaps or overlaps would make
+            // `get_band_from_slot` land on an uncovered slot and panic on light nodes. An
+            // empty band (`end == start`) adds nothing to the total or the pre-v2
+            // `Validators::hash`, so it could duplicate an existing address to hijack its
+            // `validator_map` entry without changing the header hash.
+            if validator.slots.start != total_slots || validator.slots.end <= validator.slots.start
+            {
+                return Err(InvalidValidatorsError);
+            }
+            // Each address must own a single band. The pre-v2 `Validators::hash` ignores
+            // addresses and signing keys, so a band could otherwise be split into two sharing
+            // an address but with a different signing key, hijacking `validator_map` (last-wins
+            // in `new`) and thus `get_validator_by_address`.
+            if !seen_addresses.insert(&validator.address) {
+                return Err(InvalidValidatorsError);
+            }
+            // Use `checked_add` so a crafted validator set cannot silently wrap the
+            // running total around `u16` (overflow checks are disabled in the release
+            // profile). Any overflow implies far more than `Policy::SLOTS` slots, so the
+            // set is invalid; rejecting here prevents a wrapped total from slipping
+            // through and later mismatching the `usize` total computed in
+            // `Validators::hash()`
+            total_slots = total_slots
+                .checked_add(validator.num_slots())
+                .ok_or(InvalidValidatorsError)?;
+        }
+
+        // Check structural invariants that would cause panics in Hash implementation
+
+        // Must have exactly Policy::SLOTS total slots
+        if total_slots != Policy::SLOTS {
+            return Err(InvalidValidatorsError);
+        }
+
+        // Must be a multiple of PK_TREE_BREADTH for ZK circuit compatibility
+        if !(total_slots as usize).is_multiple_of(PK_TREE_BREADTH) {
+            return Err(InvalidValidatorsError);
+        }
+
+        Ok(())
+    }
+
+    /// Checks that the validator set structure is valid (see `validate_structure`) and that all
+    /// validator voting keys can be decompressed.
+    ///
+    /// Only call this on authenticated validator sets (e.g. after the block's justification has been verified),
+    /// never on untrusted input.
+    pub fn validate_keys(&self) -> Result<(), InvalidValidatorsError> {
+        self.validate_structure()?;
+
+        for validator in self.iter() {
+            validator
+                .voting_key
+                .uncompress()
+                .ok_or(InvalidValidatorsError)?;
+        }
+
+        Ok(())
     }
 
     /// Iterates over the validators.
     pub fn iter(&self) -> Iter<'_, Validator> {
         self.validators.iter()
+    }
+
+    /// Hashes the full validator set used in the macro header hash from v2 on: per band,
+    /// in band order, the `address`, `signing_key`, `voting_key` and slot range.
+    ///
+    /// Unlike `Validators::hash`, which commits only the voting keys (leaving the signing
+    /// keys, addresses and slot ranges swappable under an unchanged hash), this binds all
+    /// of them. It is a plain hash rather than a Merkle tree — the tree only existed for a
+    /// circuit that no longer exists.
+    pub fn commitment_hash<H: HashOutput>(&self) -> H {
+        let mut bytes = Vec::new();
+        for validator in self.iter() {
+            bytes.extend_from_slice(validator.address.as_bytes());
+            bytes.extend_from_slice(validator.signing_key.as_bytes());
+            // Raw compressed BLS bytes (like `Validators::hash`) so an invalid key can't panic
+            bytes.extend_from_slice(validator.voting_key.compressed().as_ref());
+            bytes.extend_from_slice(&validator.slots.start.to_be_bytes());
+            bytes.extend_from_slice(&validator.slots.end.to_be_bytes());
+        }
+
+        H::Builder::default().chain(&bytes).finish()
     }
 }
 
@@ -213,25 +317,19 @@ impl Hash for Validators {
     /// This function is meant to calculate the public key tree "off-circuit". Generating the public key
     /// tree with this function guarantees that it is compatible with the ZK circuit.
     fn hash<H: HashOutput>(&self) -> H {
-        let public_keys = self.voting_keys_g2();
-
-        // Checking that the number of public keys is equal to the number of validator slots.
-        assert_eq!(public_keys.len(), Policy::SLOTS as usize);
-
-        // Checking that the number of public keys is a multiple of the number of leaves.
-        assert_eq!(public_keys.len() % PK_TREE_BREADTH, 0);
-
-        // Serialize the public keys into bits.
+        // Use the raw compressed key bytes directly instead of decompressing to
+        // G2Projective and re-serializing. For valid keys, the canonical compressed
+        // serialization is a fixed-point of the uncompress -> serialize_compressed
+        // round-trip, so this produces identical output. For invalid keys, this
+        // avoids the panic that would occur during decompression.
         #[cfg(not(feature = "parallel"))]
-        let iter = public_keys.iter();
+        let iter = self.validators.iter();
         #[cfg(feature = "parallel")]
-        let iter = public_keys.par_iter();
+        let iter = self.validators.par_iter();
         let bytes: Vec<u8> = iter
-            .flat_map(|pk| {
-                let mut buffer = [0u8; 285];
-                CanonicalSerialize::serialize_compressed(&pk.into_affine(), &mut buffer[..])
-                    .unwrap();
-                buffer.to_vec()
+            .flat_map(|validator| {
+                let key_bytes = validator.voting_key.compressed().as_ref();
+                key_bytes.repeat(validator.num_slots() as usize)
             })
             .collect();
 
@@ -329,8 +427,117 @@ mod serde_derive {
         where
             D: Deserializer<'de>,
         {
+            use serde::de::Error as _;
+
             let validators: Vec<Validator> = Deserialize::deserialize(deserializer)?;
+
+            // Reject oversized sets at the untrusted boundary: a tiny `slots:
+            // Range<u16>` can declare huge slot counts that `Validators::hash()`
+            // would materialize into GBs. A real set sums to exactly `Policy::SLOTS`.
+            // `checked_add` guards the `u16` total (release builds skip overflow checks).
+            let mut total_slots: u16 = 0;
+            for validator in &validators {
+                total_slots = total_slots
+                    .checked_add(validator.num_slots())
+                    .ok_or_else(|| D::Error::custom("validator slot total overflows u16"))?;
+            }
+            if total_slots > Policy::SLOTS {
+                return Err(D::Error::custom(
+                    "validator slot total exceeds Policy::SLOTS",
+                ));
+            }
+
             Ok(Self::new(validators))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use ark_ec::PrimeGroup;
+    use nimiq_bls::{G2Projective, PublicKey as BlsPublicKey};
+    use nimiq_keys::{Address, Ed25519PublicKey as SchnorrPublicKey};
+
+    use super::*;
+
+    fn validator(address: u8, slots: Range<u16>) -> Validator {
+        // The BLS generator is a valid, decompressable voting key, so `validate_keys` can only
+        // fail on the slot bands.
+        validator_with_key(
+            address,
+            BlsPublicKey::new(G2Projective::generator()).compress(),
+            slots,
+        )
+    }
+
+    fn validator_with_key(
+        address: u8,
+        voting_key: nimiq_bls::CompressedPublicKey,
+        slots: Range<u16>,
+    ) -> Validator {
+        Validator::new(
+            Address::from([address; 20]),
+            voting_key,
+            SchnorrPublicKey::default(),
+            slots,
+        )
+    }
+
+    #[test]
+    fn it_accepts_a_contiguous_full_slot_set() {
+        let validators = Validators::new(vec![validator(1, 0..Policy::SLOTS)]);
+        assert!(validators.validate_keys().is_ok());
+    }
+
+    #[test]
+    fn it_rejects_empty_slot_bands() {
+        // A zero-width band owns no slots, so it slips past the total and pre-v2 hash checks. Use
+        // a distinct address so this isolates the empty-band rejection (a duplicate address would
+        // otherwise be caught by the uniqueness check instead).
+        let validators = Validators::new(vec![
+            validator(1, 0..Policy::SLOTS),
+            validator(2, Policy::SLOTS..Policy::SLOTS),
+        ]);
+        assert!(validators.validate_keys().is_err());
+    }
+
+    #[test]
+    fn it_rejects_duplicate_addresses() {
+        // A band split into two contiguous, non-empty bands sharing an address keeps the total
+        // and the pre-v2 hash intact, but must be rejected so `validator_map` stays unambiguous.
+        let validators = Validators::new(vec![
+            validator(1, 0..(Policy::SLOTS / 2)),
+            validator(1, (Policy::SLOTS / 2)..Policy::SLOTS),
+        ]);
+        assert!(validators.validate_keys().is_err());
+    }
+
+    #[test]
+    fn validate_structure_does_not_check_voting_keys() {
+        let invalid_key = nimiq_bls::CompressedPublicKey {
+            public_key: [0xFF; nimiq_bls::CompressedPublicKey::SIZE],
+        };
+        let validators =
+            Validators::new(vec![validator_with_key(1, invalid_key, 0..Policy::SLOTS)]);
+
+        assert!(validators.validate_structure().is_ok());
+        assert!(validators.validate_keys().is_err());
+    }
+
+    #[test]
+    fn validate_keys_checks_structure_before_decompressing() {
+        use nimiq_keys::SecureGenerate;
+
+        // A fresh key, so no other test can have decompressed it. The gap is invalid: the first
+        // band must start at slot 0.
+        let fresh_key = nimiq_bls::KeyPair::generate_default_csprng()
+            .public_key
+            .compress();
+        let validators = Validators::new(vec![validator_with_key(1, fresh_key, 1..Policy::SLOTS)]);
+
+        assert!(validators.validate_keys().is_err());
+        assert!(!validators.validators[0].voting_key.has_uncompressed());
     }
 }

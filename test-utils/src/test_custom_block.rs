@@ -1,18 +1,22 @@
 use nimiq_account::BlockState;
 use nimiq_block::{
     Block, EquivocationProof, MacroBlock, MacroBody, MacroHeader, MicroBlock, MicroBody,
-    MicroHeader, MicroJustification, MultiSignature, SignedSkipBlockInfo, SkipBlockInfo,
-    SkipBlockProof, TendermintProof,
+    MicroHeader, MicroJustification, MultiSignature, SkipBlockInfo, SkipBlockProof,
+    TendermintProof,
 };
 use nimiq_blockchain::{interface::HistoryInterface, Blockchain};
 use nimiq_blockchain_interface::AbstractBlockchain;
-use nimiq_bls::{AggregateSignature, KeyPair as BlsKeyPair};
+use nimiq_bls::{
+    AggregateSignature, CompressedPublicKey, KeyPair as BlsKeyPair,
+    LazyPublicKey as LazyBlsPublicKey,
+};
 use nimiq_collections::BitSet;
 use nimiq_database::traits::WriteTransaction;
 use nimiq_hash::{Blake2bHash, Blake2sHash, Hash};
-use nimiq_keys::KeyPair as SchnorrKeyPair;
+use nimiq_keys::{KeyPair as SchnorrKeyPair, SecureGenerate};
 use nimiq_primitives::{
-    networks::NetworkId, policy::Policy, TendermintIdentifier, TendermintStep, TendermintVote,
+    networks::NetworkId, policy::Policy, slots_allocation::Validators, TendermintIdentifier,
+    TendermintStep, TendermintVote,
 };
 use nimiq_tendermint::ProposalMessage;
 use nimiq_transaction::{
@@ -116,13 +120,16 @@ pub fn next_micro_block(
         None,
     );
 
-    let block_state = BlockState::new(block_number, timestamp);
+    let block_state = BlockState::new(block_number, timestamp, Policy::max_supported_version());
 
     let (state_root, diff_root, executed_txns) = blockchain
         .state
         .accounts
         .exercise_transactions(&transactions, &inherents, &block_state, None)
         .expect("Failed to compute accounts hash during block production");
+
+    // Allow tests to inject a specific diff root (e.g. an incorrect one).
+    let diff_root = config.diff_root.clone().unwrap_or(diff_root);
 
     let hist_txs = HistoricTransaction::from(
         blockchain.network_id,
@@ -220,7 +227,7 @@ pub fn next_skip_block(
     let inherents =
         blockchain.create_punishment_inherents(block_number, &[], Some(skip_block_info), None);
 
-    let block_state = BlockState::new(block_number, timestamp);
+    let block_state = BlockState::new(block_number, timestamp, Policy::max_supported_version());
 
     let (real_state_root, real_diff_root, _) = blockchain
         .state
@@ -228,7 +235,13 @@ pub fn next_skip_block(
         .exercise_transactions(&[], &inherents, &block_state, None)
         .expect("Failed to compute accounts hash during block production");
 
-    let state_root = config.state_root.clone().unwrap_or(real_state_root);
+    // The proof is signed over the real (deterministic) state root, mirroring honest validators.
+    // `config.state_root` may override the header's state root to model a forgery; from
+    // `upgrades::v2::SKIP_BLOCK_STATE_ROOT_BINDING` on, such a mismatch invalidates the proof.
+    let state_root = config
+        .state_root
+        .clone()
+        .unwrap_or_else(|| real_state_root.clone());
     let diff_root = config.diff_root.clone().unwrap_or(real_diff_root);
 
     let hist_txs = HistoricTransaction::from(
@@ -257,11 +270,13 @@ pub fn next_skip_block(
         transactions: vec![],
     };
 
+    let version = config
+        .version
+        .unwrap_or(blockchain.state().current_version());
+
     let header = MicroHeader {
         network,
-        version: config
-            .version
-            .unwrap_or(blockchain.state().current_version()),
+        version,
         block_number,
         timestamp,
         parent_hash,
@@ -274,7 +289,8 @@ pub fn next_skip_block(
         ..Default::default()
     };
 
-    let skip_block_proof = create_skip_block_proof(voting_key, blockchain, config);
+    let skip_block_proof =
+        create_skip_block_proof(voting_key, blockchain, config, &real_state_root, version);
 
     MicroBlock {
         header,
@@ -354,7 +370,8 @@ pub fn next_macro_block_proposal(
         ..Default::default()
     };
 
-    let reward_transactions = blockchain.create_reward_transactions(&header, &staking_contract);
+    let reward_transactions =
+        blockchain.create_reward_transactions(&header, &staking_contract, None);
 
     let body = MacroBody {
         transactions: reward_transactions,
@@ -370,7 +387,7 @@ pub fn next_macro_block_proposal(
 
     let inherents: Vec<Inherent> = blockchain.create_macro_block_inherents(&macro_block);
 
-    let block_state = BlockState::new(block_number, timestamp);
+    let block_state = BlockState::new(block_number, timestamp, Policy::max_supported_version());
 
     let mut txn = blockchain.write_transaction();
 
@@ -385,7 +402,8 @@ pub fn next_macro_block_proposal(
     };
 
     macro_block.header.state_root = state_root;
-    macro_block.header.diff_root = diff_root;
+    // Allow tests to inject a specific diff root (e.g. an incorrect one).
+    macro_block.header.diff_root = config.diff_root.clone().unwrap_or(diff_root);
 
     let hist_txs = HistoricTransaction::from(
         blockchain.network_id,
@@ -468,26 +486,59 @@ pub fn next_macro_block(
         blockchain.get_validators_for_epoch(Policy::epoch_at(blockchain.block_number() + 1), None);
     assert!(validators.is_ok());
 
+    finalize_macro_block_proposal(voting_key, macro_block_proposal, block_hash, config)
+}
+
+/// Finalizes a macro block proposal with a justification by `voting_key` over `block_hash`.
+pub fn finalize_macro_block_proposal(
+    voting_key: &BlsKeyPair,
+    proposal: MacroBlock,
+    block_hash: Blake2sHash,
+    config: &BlockConfig,
+) -> Block {
     Block::Macro(finalize_macro_block(
         voting_key,
         ProposalMessage {
             valid_round: None,
-            proposal: macro_block_proposal.header,
+            proposal: proposal.header,
             round: config.tendermint_round.unwrap_or(0),
         },
-        macro_block_proposal
-            .body
-            .or_else(|| Some(MacroBody::default()))
-            .unwrap(),
+        proposal.body.unwrap_or_default(),
         block_hash,
         config,
     ))
+}
+
+/// Replaces the voting keys of `validators` with fresh ones (that nothing has decompressed yet)
+/// and returns them.
+pub fn replace_voting_keys(validators: &mut Validators) -> Vec<LazyBlsPublicKey> {
+    validators
+        .validators
+        .iter_mut()
+        .map(|validator| {
+            validator.voting_key = BlsKeyPair::generate_default_csprng()
+                .public_key
+                .compress()
+                .into();
+            validator.voting_key.clone()
+        })
+        .collect()
+}
+
+/// Returns a voting key that can't be decompressed.
+pub fn invalid_voting_key() -> LazyBlsPublicKey {
+    CompressedPublicKey {
+        public_key: [0xFF; CompressedPublicKey::SIZE],
+    }
+    .into()
 }
 
 fn create_skip_block_proof(
     voting_key_pair: &BlsKeyPair,
     blockchain: &Blockchain,
     config: &BlockConfig,
+    state_root: &Blake2bHash,
+    protocol_version: u16,
 ) -> SkipBlockProof {
     let seed = config
         .seed
@@ -500,11 +551,10 @@ fn create_skip_block_proof(
         vrf_entropy: seed.entropy(),
     };
 
-    let skip_block_info =
-        SignedSkipBlockInfo::from_message(skip_block_info, &voting_key_pair.secret_key, 0);
-
-    let signature =
-        AggregateSignature::from_signatures(&[skip_block_info.signature.multiply(Policy::SLOTS)]);
+    let signature = AggregateSignature::from_signatures(&[voting_key_pair
+        .secret_key
+        .sign_hash(skip_block_info.signing_hash(state_root, protocol_version))
+        .multiply(Policy::SLOTS)]);
     let mut signers = BitSet::new();
     for i in 0..Policy::SLOTS {
         signers.insert(i as usize);

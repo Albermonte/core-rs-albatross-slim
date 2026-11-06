@@ -2,7 +2,9 @@ use nimiq_bls::{CompressedSignature, KeyPair as BlsKeyPair};
 use nimiq_hash::Blake2bHash;
 use nimiq_keys::{Address, Ed25519PublicKey as SchnorrPublicKey};
 use nimiq_primitives::coin::Coin;
-use nimiq_transaction::account::staking_contract::IncomingStakingTransactionData;
+use nimiq_transaction::account::staking_contract::{
+    IncomingStakingTransactionData, SignalDataUpdate,
+};
 
 use crate::recipient::Recipient;
 
@@ -112,6 +114,39 @@ impl StakingRecipientBuilder {
     /// It needs to be signed by the key pair corresponding to the cold key.
     pub fn retire_validator(&mut self) -> &mut Self {
         self.data = Some(IncomingStakingTransactionData::RetireValidator {
+            proof: Default::default(),
+        });
+        self
+    }
+
+    /// This method allows to set the signal data of an existing validator entry. In contrast to
+    /// [`update_validator`](Self::update_validator), this transaction is signed by the key pair
+    /// corresponding to the validator's *signing (warm) key*, so that the cold key is not required
+    /// to signal protocol upgrades.
+    pub fn set_signal_data(
+        &mut self,
+        validator_address: Address,
+        new_signal_data: Option<Blake2bHash>,
+    ) -> &mut Self {
+        self.data = Some(IncomingStakingTransactionData::SetSignalData {
+            validator_address,
+            update: SignalDataUpdate::Full(new_signal_data),
+            proof: Default::default(),
+        });
+        self
+    }
+
+    /// This method signals support for the given protocol `version`. Like
+    /// [`set_signal_data`](Self::set_signal_data), it needs to be signed by the validator's signing
+    /// (warm) key.
+    ///
+    /// In contrast to [`set_signal_data`](Self::set_signal_data), this only updates the version
+    /// bytes of the signal data and preserves the rest; it cannot clear the field (use
+    /// [`set_signal_data`](Self::set_signal_data) with `None` for that).
+    pub fn signal_version(&mut self, validator_address: Address, version: u16) -> &mut Self {
+        self.data = Some(IncomingStakingTransactionData::SetSignalData {
+            validator_address,
+            update: SignalDataUpdate::Version(version),
             proof: Default::default(),
         });
         self

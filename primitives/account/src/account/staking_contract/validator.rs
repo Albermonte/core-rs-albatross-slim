@@ -2,12 +2,17 @@ use nimiq_bls::CompressedPublicKey as BlsPublicKey;
 use nimiq_hash::Blake2bHash;
 use nimiq_keys::{Address, Ed25519PublicKey as SchnorrPublicKey};
 use nimiq_primitives::{account::AccountError, coin::Coin, policy::Policy};
+#[cfg(feature = "interaction-traits")]
+use nimiq_transaction::account::staking_contract::SignalDataUpdate;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "interaction-traits")]
 use crate::{
     account::staking_contract::{
-        receipts::{DeleteValidatorReceipt, ReactivateValidatorReceipt, UpdateValidatorReceipt},
+        receipts::{
+            DeleteValidatorReceipt, ReactivateValidatorReceipt, SetSignalDataReceipt,
+            UpdateValidatorReceipt,
+        },
         store::{
             StakingContractStoreReadOps, StakingContractStoreReadOpsExt, StakingContractStoreWrite,
         },
@@ -44,6 +49,14 @@ use crate::{
 ///      in the first place.
 /// (**) The validator may be set to automatically reactivate itself upon inactivation.
 ///      If this setting is not enabled the state change can only be triggered manually.
+/// (***) The validator has a set of status invariants:
+///             (invariant 1) Retired validators are marked inactive:
+///                           `retired` implies `inactive_from.is_some()`
+///             (invariant 2) Validators whose jail period is still active are marked inactive:
+///                           `is_jailed(block_number)` implies `inactive_from.is_some()`
+///
+/// `jailed_from.is_some()` alone does not mean that a validator is currently jailed.
+/// The field is retained after the jail period and may coexist with an active validator.
 ///
 /// Create, Update, Deactivate, Retire and Re-activate are incoming transactions to the staking contract.
 /// Delete is an outgoing transaction from the staking contract.
@@ -141,7 +154,7 @@ impl Validator {
         let inactive_from = self
             .inactive_from
             .expect("Validator is retired so it must be inactive");
-        let wait_until = Policy::last_block_of_reporting_window(inactive_from);
+        let wait_until = Policy::last_block_of_collateral_lockup(inactive_from);
         if block_number <= wait_until {
             debug!(
                 ?self.address,
@@ -165,6 +178,7 @@ pub struct Tombstone {
 impl StakingContract {
     /// Creates a new validator. The initial stake is always equal to the validator deposit
     /// and can only be retrieved by deleting the validator.
+    /// `block_number` is the height at which the supplied validator state is evaluated.
     /// This function is public to fill the genesis staking contract.
     pub fn create_validator(
         &mut self,
@@ -178,6 +192,7 @@ impl StakingContract {
         inactive_from: Option<u32>,
         jailed_from: Option<u32>,
         retired: bool,
+        block_number: u32,
         tx_logger: &mut TransactionLog,
     ) -> Result<(), AccountError> {
         // Fail if the validator already exists.
@@ -185,6 +200,15 @@ impl StakingContract {
             return Err(AccountError::AlreadyExistentAddress {
                 address: validator_address.clone(),
             });
+        }
+        // Enforce invariant 1: a retired validator must be inactive because validator
+        // deletion relies on `inactive_from`.
+        // Enforce invariant 2: a validator whose jail is still active must be inactive so
+        // that it is not included in `active_validators` below.
+        let is_currently_jailed = jailed_from
+            .is_some_and(|jailed_from| block_number < Policy::block_after_jail(jailed_from));
+        if inactive_from.is_none() && (retired || is_currently_jailed) {
+            return Err(AccountError::InvalidForRecipient);
         }
         // Fail if validator existed already.
         let tombstone = store.get_tombstone(validator_address);
@@ -212,7 +236,7 @@ impl StakingContract {
         // Update our balance.
         self.balance += deposit;
 
-        if !retired && inactive_from.is_none() {
+        if validator.is_active() {
             self.active_validators
                 .insert(validator_address.clone(), validator.total_stake);
         }
@@ -340,6 +364,85 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Sets the signal data of a validator. In contrast to `update_validator`, this is signed
+    /// with the validator's warm (signing) key, so that operators do not need their cold key to
+    /// signal protocol upgrades. The `signer` is the address derived from the transaction proof.
+    pub fn set_signal_data(
+        &mut self,
+        store: &mut StakingContractStoreWrite,
+        validator_address: &Address,
+        signer: &Address,
+        update: SignalDataUpdate,
+        tx_logger: &mut TransactionLog,
+    ) -> Result<SetSignalDataReceipt, AccountError> {
+        // Get the validator.
+        let mut validator = store.expect_validator(validator_address)?;
+
+        // Check that the signer is correct (it must be the validator's warm/signing key).
+        if *signer != Address::from(&validator.signing_key) {
+            debug!("The transaction signer doesn't match the signing key of the validator.");
+            return Err(AccountError::InvalidSignature);
+        }
+
+        // Create the receipt.
+        let receipt = SetSignalDataReceipt {
+            old_signal_data: validator.signal_data.clone(),
+        };
+
+        // All checks passed, not allowed to fail from here on!
+
+        // Resolve the update mode into the new signal data value.
+        let new_signal_data = match update {
+            // Full mode replaces the entire field (and thus any previously signaled version); it is
+            // the only mode that can clear the field to `None`.
+            SignalDataUpdate::Full(signal_data) => signal_data,
+            // Version mode is a non-destructive partial update: it only sets the version bytes and
+            // preserves the rest, so it always yields a present value.
+            SignalDataUpdate::Version(version) => Some(Policy::signal_data_with_version(
+                validator.signal_data.clone(),
+                version,
+            )),
+        };
+
+        // Update the validator's signal data.
+        validator.signal_data = new_signal_data.clone();
+
+        tx_logger.push_log(Log::SetSignalData {
+            validator_address: validator_address.clone(),
+            signal_data: new_signal_data,
+        });
+
+        // Update the validator entry.
+        store.put_validator(validator_address, validator);
+
+        Ok(receipt)
+    }
+
+    /// Reverts setting the signal data of a validator.
+    pub fn revert_set_signal_data(
+        &mut self,
+        store: &mut StakingContractStoreWrite,
+        validator_address: &Address,
+        receipt: SetSignalDataReceipt,
+        tx_logger: &mut TransactionLog,
+    ) -> Result<(), AccountError> {
+        // Get the validator.
+        let mut validator = store.expect_validator(validator_address)?;
+
+        tx_logger.push_log(Log::SetSignalData {
+            validator_address: validator_address.clone(),
+            signal_data: validator.signal_data.clone(),
+        });
+
+        // Revert the signal data.
+        validator.signal_data = receipt.old_signal_data;
+
+        // Update the validator entry.
+        store.put_validator(validator_address, validator);
+
+        Ok(())
+    }
+
     /// Deactivates a validator. It is necessary to retire a validator before dropping it.
     pub fn deactivate_validator(
         &mut self,
@@ -436,7 +539,7 @@ impl StakingContract {
 
         let next_election_block = Policy::election_block_after(block_number);
 
-        // Mark validator as inactive.
+        // Mark validator as inactive to preserve invariant 2.
         // A validator can only effectively become inactive on the next election block.
         if newly_deactivated {
             validator.inactive_from = Some(next_election_block);
@@ -501,10 +604,13 @@ impl StakingContract {
         // Update validator entry.
         store.put_validator(validator_address, validator);
 
-        tx_logger.push_log(Log::DeactivateValidator {
-            validator_address: validator_address.clone(),
-            inactive_from: inactive_from.expect("must have inactivation block number"),
-        });
+        // Mirror the conditional log emission in `jail_validator`.
+        if receipt.newly_deactivated {
+            tx_logger.push_log(Log::DeactivateValidator {
+                validator_address: validator_address.clone(),
+                inactive_from: inactive_from.expect("must have inactivation block number"),
+            });
+        }
         tx_logger.push_log(Log::JailValidator {
             validator_address: validator_address.clone(),
             event_block: jailed_from,
@@ -532,13 +638,13 @@ impl StakingContract {
             return Err(AccountError::InvalidForRecipient);
         }
 
-        // Check that the validator is not retired.
+        // Check that reactivation would not violate invariant 1.
         if validator.retired {
             debug!(?validator_address, "Validator is retired");
             return Err(AccountError::InvalidForRecipient);
         }
 
-        // Check that the validator is not jailed.
+        // Check that reactivation would not violate invariant 2.
         if validator.is_jailed(block_number) {
             debug!(
                 ?validator_address,
@@ -631,7 +737,7 @@ impl StakingContract {
             validator_address: validator_address.clone(),
         });
 
-        // Mark validator as inactive if it is still active.
+        // Mark validator as inactive if it is still active to preserve invariant 1.
         let was_active = validator.is_active();
         if was_active {
             // A validator can only effectively become inactive on the next election block.

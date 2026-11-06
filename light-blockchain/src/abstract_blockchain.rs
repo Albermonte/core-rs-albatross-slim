@@ -39,6 +39,9 @@ impl AbstractBlockchain for LightBlockchain {
     fn accounts_complete(&self) -> bool {
         false
     }
+    fn protocol_version(&self) -> u16 {
+        self.head.version()
+    }
 
     fn current_validators(&self) -> Option<&Validators> {
         self.current_validators.as_ref()
@@ -95,7 +98,10 @@ impl AbstractBlockchain for LightBlockchain {
     }
 
     fn get_proposer_at(&self, block_number: u32, offset: u32) -> Result<Slot, BlockchainError> {
-        let vrf_entropy = self.get_block_at(block_number - 1, false)?.seed().entropy();
+        let predecessor = block_number
+            .checked_sub(1)
+            .ok_or(BlockchainError::BlockNotFound(block_number))?;
+        let vrf_entropy = self.get_block_at(predecessor, false)?.seed().entropy();
         self.get_proposer(block_number, offset, vrf_entropy)
     }
 

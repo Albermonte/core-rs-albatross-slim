@@ -5,6 +5,8 @@
 //! These handlers are registered to process incoming network requests during consensus and syncing operations.
 
 #[cfg(feature = "full")]
+use std::convert::TryFrom;
+#[cfg(feature = "full")]
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
@@ -57,9 +59,16 @@ impl<N: Network> Handle<N, BlockchainProxy> for RequestMacroChain {
             if let Ok(chain_info) = chain_info
                 && chain_info.on_main_chain
             {
-                // We found a block, ignore remaining block locator hashes.
-                start_block_hash = Some(locator.clone());
-                break;
+                // Validate that the locator is a macro block before using it.
+                // This prevents panics when get_macro_blocks() is called with a micro block hash.
+                if let Ok(block) = blockchain.get_block(locator, false)
+                    && block.is_macro()
+                {
+                    // We found a macro block on the main chain, use it.
+                    start_block_hash = Some(locator.clone());
+                    break;
+                }
+                // Skip micro blocks and continue searching for a macro block.
             }
         }
         let Some(start_block_hash) = start_block_hash else {
@@ -75,7 +84,7 @@ impl<N: Network> Handle<N, BlockchainProxy> for RequestMacroChain {
                 Direction::Forward,
                 true,
             )
-            .unwrap(); // We made sure that start_block_hash is on our chain.
+            .unwrap(); // Safe: We validated that start_block_hash is a macro block on our chain.
         let epochs: Vec<_> = election_blocks.iter().map(|block| block.hash()).collect();
 
         // Add latest checkpoint block if all of the following conditions are met:
@@ -119,6 +128,24 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestBatchSet {
             Ok(Block::Micro(_)) => return Err(BatchSetError::MicroBlockGiven),
             Err(_) => return Err(BatchSetError::TargetHashNotFound),
         };
+
+        let prove_history_len =
+            |batch_set_hash: &Blake2bHash, block_number: u32| -> Result<_, BatchSetError> {
+                blockchain
+                    .history_store
+                    .prove_num_leaves(block_number, None)
+                    .map_err(|error| {
+                        log::error!(
+                            error = ?error,
+                            requested_hash = %self.hash,
+                            batch_set_hash = %batch_set_hash,
+                            block_number,
+                            "Failed to prove history size for batch set request"
+                        );
+                        BatchSetError::CouldntProduceHistorySizeProof
+                    })
+            };
+
         // Try to get the epoch chunk hashes following the given macro block.
         // For each hash, fetch the macro block and its history length, and build a batch set.
         // If there are no chunks, create a single batch set with the provided block.
@@ -135,10 +162,7 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestBatchSet {
                     .get_block(&macro_hash, true, None)
                     .expect("Macro block must exist since it can't be pruned");
 
-                let history_len = blockchain
-                    .history_store
-                    .prove_num_leaves(macro_block.block_number(), None)
-                    .expect("Failed to prove history size");
+                let history_len = prove_history_len(&macro_hash, macro_block.block_number())?;
 
                 let batch_set = BatchSet {
                     macro_block: macro_block.unwrap_macro(),
@@ -149,10 +173,7 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestBatchSet {
             batch_sets
         } else {
             // If there are no epoch chunks, create a single batch set from the given macro block.
-            let history_len = blockchain
-                .history_store
-                .prove_num_leaves(block.block_number(), None)
-                .expect("Failed to prove history size");
+            let history_len = prove_history_len(&self.hash, block.block_number())?;
 
             let batch_set = BatchSet {
                 macro_block: block.clone(),
@@ -182,12 +203,16 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestHistoryChunk {
         _peer_id: N::PeerId,
         blockchain: &Arc<RwLock<Blockchain>>,
     ) -> Result<HistoryChunk, HistoryChunkError> {
+        let Ok(chunk_index) = usize::try_from(self.chunk_index) else {
+            return Err(HistoryChunkError::CouldntProduceProof);
+        };
+
         // Attempt to retrieve a proof for the requested history chunk.
         if let Some(chunk) = blockchain.read().history_store.prove_chunk(
             self.epoch_number,
             self.block_number,
             CHUNK_SIZE,
-            self.chunk_index as usize,
+            chunk_index,
             None,
         ) {
             // Return the chunk if the proof was successfully generated.
@@ -444,6 +469,10 @@ impl RequestTransactionsProof {
         block_number: u32,
     ) -> Result<ResponseTransactionsProof, ResponseTransactionProofError> {
         let blockchain = blockchain.read();
+        let Some(history_index) = blockchain.history_store.history_index() else {
+            log::info!("Cannot create transaction proof without history index");
+            return Err(ResponseTransactionProofError::Other);
+        };
         let hashes: Vec<&Blake2bHash> = transactions.iter().collect();
 
         // There are three possible scenarios for creating a transaction inclusion proof:
@@ -546,7 +575,7 @@ impl RequestTransactionsProof {
             ));
         };
 
-        let proof = match blockchain.history_store.history_index().unwrap().prove(
+        let proof = match history_index.prove(
             Policy::epoch_at(proving_block_number),
             hashes,
             verifier_state,
@@ -569,6 +598,10 @@ impl RequestTransactionsProof {
         transaction: &Blake2bHash,
     ) -> Result<ResponseTransactionsProof, ResponseTransactionProofError> {
         let blockchain = blockchain.read();
+        let Some(history_index) = blockchain.history_store.history_index() else {
+            log::info!("Cannot create transaction proof without history index");
+            return Err(ResponseTransactionProofError::Other);
+        };
 
         let mut verifier_state = None;
         let election_head = blockchain.election_head().block_number();
@@ -576,11 +609,7 @@ impl RequestTransactionsProof {
         let current_head = blockchain.head().block_number();
 
         // Get the historic transaction from the history store
-        let historic_transaction = blockchain
-            .history_store
-            .history_index()
-            .unwrap()
-            .get_hist_tx_by_hash(transaction, None);
+        let historic_transaction = history_index.get_hist_tx_by_hash(transaction, None);
 
         if let Some(hist_txn) = historic_transaction {
             let block_number = hist_txn.block_number;
@@ -616,7 +645,7 @@ impl RequestTransactionsProof {
             }
 
             // Prove the transaction
-            let proof = match blockchain.history_store.history_index().unwrap().prove(
+            let proof = match history_index.prove(
                 Policy::epoch_at(proving_block_number),
                 vec![transaction],
                 verifier_state,
@@ -675,30 +704,27 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestTransactionReceip
         blockchain: &Arc<RwLock<Blockchain>>,
     ) -> ResponseTransactionReceiptsByAddress {
         let blockchain = blockchain.read();
+        let Some(history_index) = blockchain.history_store.history_index() else {
+            log::info!("Cannot fetch transaction receipts by address without history index");
+            return ResponseTransactionReceiptsByAddress { receipts: vec![] };
+        };
 
         // Get the transaction hashes for this address.
-        let raw_tx_hashes = blockchain
-            .history_store
-            .history_index()
-            .unwrap()
-            .get_tx_hashes_by_address(
-                &self.address,
-                self.max
-                    .unwrap_or(Self::MAX_RECEIPTS)
-                    .min(Self::MAX_RECEIPTS),
-                self.start_at.clone(),
-                None,
-            );
+        let raw_tx_hashes = history_index.get_tx_hashes_by_address(
+            &self.address,
+            self.max
+                .unwrap_or(Self::MAX_RECEIPTS)
+                .min(Self::MAX_RECEIPTS),
+            self.start_at.clone(),
+            None,
+        );
 
         let mut receipts = vec![];
 
         for hash in raw_tx_hashes {
             // Get all the historic transactions that correspond to this hash.
             receipts.extend(
-                blockchain
-                    .history_store
-                    .history_index()
-                    .unwrap()
+                history_index
                     .get_hist_tx_by_hash(&hash, None)
                     .iter()
                     .map(|hist_tx| (hist_tx.tx_hash().into(), hist_tx.block_number)),
@@ -720,8 +746,15 @@ impl<N: Network> Handle<N, Arc<RwLock<Blockchain>>> for RequestTrieProof {
         blockchain: &Arc<RwLock<Blockchain>>,
     ) -> Result<ResponseTrieProof, ResponseTrieProofError> {
         // Validate request.
+        if self.keys.is_empty() {
+            return Err(ResponseTrieProofError::EmptyKeys);
+        }
         if self.keys.len() > Self::MAX_KEYS {
             return Err(ResponseTrieProofError::TooManyKeys);
+        }
+        let unique_keys: std::collections::BTreeSet<_> = self.keys.iter().collect();
+        if unique_keys.len() != self.keys.len() {
+            return Err(ResponseTrieProofError::DuplicateKeys);
         }
 
         // We only prove accounts that exist in our current state

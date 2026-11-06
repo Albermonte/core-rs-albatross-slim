@@ -6,12 +6,41 @@ use nimiq_database::{
     traits::{ReadTransaction, WriteTransaction},
 };
 use nimiq_hash::Hash;
-use nimiq_primitives::policy::Policy;
+use nimiq_primitives::{
+    policy::{upgrades, Policy},
+    trie::trie_diff::TrieDiff,
+    TreeProof,
+};
+use nimiq_trie::WriteTransactionProxy as TrieMdbxWriteTransaction;
 
 use crate::{interface::HistoryInterface, BlockProducer, Blockchain};
 
 /// Implements methods to verify the validity of blocks.
 impl Blockchain {
+    fn verify_macro_block_interlink(&self, macro_block: &MacroBlock) -> Result<(), BlockError> {
+        match (macro_block.is_election(), &macro_block.header.interlink) {
+            (true, Some(interlink)) => {
+                let expected_interlink = self.election_head().get_next_interlink();
+                if Some(interlink) != expected_interlink.ok().as_ref() {
+                    warn!(reason = "Bad Interlink", "Rejecting block");
+                    return Err(BlockError::InvalidInterlink);
+                }
+            }
+            (true, None) => {
+                warn!(reason = "Missing Interlink", "Rejecting block");
+                return Err(BlockError::InvalidInterlink);
+            }
+            (false, Some(_)) => {
+                warn!(reason = "Superfluous Interlink", "Rejecting block");
+                return Err(BlockError::InvalidInterlink);
+            }
+            // Non-election blocks don't contain interlinks.
+            (false, None) => {}
+        }
+
+        Ok(())
+    }
+
     /// Verifies a block for the current blockchain state.
     /// This method does a full verification on the block except for the block state checks.
     /// See `verify_block_state` for these type of checks.
@@ -27,7 +56,8 @@ impl Blockchain {
         }
 
         // Perform block intrinsic checks.
-        block.verify(self.network_id)?;
+        let max_timestamp = self.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        block.verify(self.network_id, max_timestamp)?;
 
         // Fetch predecessor block. Fail if it doesn't exist.
         let predecessor = self
@@ -46,25 +76,8 @@ impl Blockchain {
 
         // Verify the interlink (or its absence)
         if let Block::Macro(macro_block) = &block {
-            match (macro_block.is_election(), &macro_block.header.interlink) {
-                (true, Some(interlink)) => {
-                    let expected_interlink = self.election_head().get_next_interlink();
-                    if Some(interlink) != expected_interlink.ok().as_ref() {
-                        warn!(reason = "Bad Interlink", "Rejecting block");
-                        return Err(PushError::InvalidBlock(BlockError::InvalidInterlink));
-                    }
-                }
-                (true, None) => {
-                    warn!(reason = "Missing Interlink", "Rejecting block");
-                    return Err(PushError::InvalidBlock(BlockError::InvalidInterlink));
-                }
-                (false, Some(_)) => {
-                    warn!(reason = "Superfluous Interlink", "Rejecting block");
-                    return Err(PushError::InvalidBlock(BlockError::InvalidInterlink));
-                }
-                // Non-election blocks don't contain interlinks.
-                (false, None) => {}
-            }
+            self.verify_macro_block_interlink(macro_block)
+                .map_err(PushError::InvalidBlock)?;
         }
 
         // In trusted don't do slot related checks since they are mostly signature verifications
@@ -96,21 +109,45 @@ impl Blockchain {
 
             // Verify that the equivocation proofs are valid.
             self.verify_equivocation_proofs(block, txn)?;
+        } else {
+            // Trusted blocks skip `verify_validators`, which checks the elected voting keys.
+            block.verify_voting_keys()?;
         }
 
         Ok(())
     }
 
     fn verify_transactions(&self, block: &Block) -> Result<(), BlockError> {
+        let version = block.version();
         if let Some(transactions) = block.transactions() {
             for transaction in transactions {
                 let transaction = transaction.get_raw_transaction();
-                if !self.tx_verification_cache.is_known(&transaction.hash()) {
-                    transaction.verify(self.network_id)?;
+                if !self.tx_verification_cache.is_verified(transaction, version) {
+                    transaction.verify(self.network_id, version)?;
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// Verifies that the block's `diff_root` matches the forward `diff` produced by applying it.
+    /// Enforced only from `DIFF_ROOT_COMMITMENT` on; earlier blocks are not checked.
+    pub(crate) fn verify_diff_root(&self, block: &Block, diff: &TrieDiff) -> Result<(), PushError> {
+        if block.version() < upgrades::v2::DIFF_ROOT_COMMITMENT {
+            return Ok(());
+        }
+        let diff_root = TreeProof::new(diff.0.iter()).root_hash();
+        if *block.diff_root() != diff_root {
+            warn!(
+                %block,
+                header_root = %block.diff_root(),
+                computed_root = %diff_root,
+                reason = "Header diff root doesn't match real diff root",
+                "Rejecting block"
+            );
+            return Err(PushError::InvalidBlock(BlockError::DiffRootMismatch));
+        }
         Ok(())
     }
 
@@ -233,12 +270,10 @@ impl Blockchain {
                     equivocation_proof.locator(),
                 ));
             }
-            let validators = self
-                .get_validators_for_epoch(
-                    Policy::epoch_at(equivocation_proof.block_number()),
-                    Some(txn),
-                )
-                .expect("Couldn't calculate validators");
+            let validators = self.get_validators_for_epoch(
+                Policy::epoch_at(equivocation_proof.block_number()),
+                Some(txn),
+            )?;
             equivocation_proof.verify(block.network(), &validators)?;
         }
         Ok(())
@@ -270,8 +305,46 @@ impl Blockchain {
             return Ok(());
         }
 
+        // If this block triggers a version upgrade, it must be an election block with enough
+        // support. The support check mirrors the proposer-side check in
+        // `TendermintProtocol::create_proposal` and gates the same `VersionUpgrade` inherent applied
+        // during `commit_accounts`: without it a malicious proposer could bump the version with
+        // insufficient support and thereby deactivate most of the active validators.
+        let new_version = macro_block.header.version;
+        if Some(new_version) == self.state.current_version().checked_add(1) {
+            // The network only accepts a version increase on election blocks: proposing one on a
+            // checkpoint block would halt the chain. Reject it here too as defense in depth, even
+            // though `Block::verify_immediate_successor` already rejects a version bump on a
+            // non-election block.
+            if !macro_block.is_election() {
+                warn!(
+                    %macro_block,
+                    new_version,
+                    reason = "Version upgrade on a non-election block",
+                    "Rejecting block"
+                );
+                return Err(PushError::InvalidBlock(BlockError::InvalidVersionUpgrade));
+            }
+
+            let validators = self
+                .current_validators()
+                .expect("Current validators must be present");
+            let data_store = self.get_staking_contract_store();
+            let data_store_read = data_store.read(txn);
+            if !staking_contract.supports_version_upgrade(&data_store_read, validators, new_version)
+            {
+                warn!(
+                    %macro_block,
+                    new_version,
+                    reason = "Version upgrade lacks sufficient support",
+                    "Rejecting block"
+                );
+                return Err(PushError::InvalidBlock(BlockError::InvalidVersionUpgrade));
+            }
+        }
+
         let reward_transactions =
-            self.create_reward_transactions(&macro_block.header, &staking_contract);
+            self.create_reward_transactions(&macro_block.header, &staking_contract, Some(txn));
 
         let body = macro_block
             .body
@@ -375,7 +448,8 @@ impl Blockchain {
         let mut block = Block::Macro(proposed_block);
 
         // Make sure the header verifies
-        if let Err(error) = block.verify_header(self.network_id, false) {
+        let max_timestamp = self.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        if let Err(error) = block.verify_header(self.network_id, false, max_timestamp) {
             debug!(%error, %block, "Tendermint - await_proposal: Invalid block header");
             return Err(PushError::InvalidBlock(error));
         }
@@ -392,9 +466,20 @@ impl Blockchain {
             return Err(PushError::InvalidBlock(error));
         }
 
+        if let Block::Macro(macro_block) = &block {
+            self.verify_macro_block_interlink(macro_block)
+                .map_err(PushError::InvalidBlock)?;
+        }
+
         // Make sure the proposer is correct using the predecessor to determine slot ownership.
         if let Err(error) = block.verify_proposer(&proposer, predecessor.head.seed()) {
             debug!(%error, %block, "Tendermint - await_proposal: Invalid block header, VRF seed verification failed");
+            return Err(PushError::InvalidBlock(error));
+        }
+
+        // The proposal is signed by its proposer, so the elected voting keys can be checked now.
+        if let Err(error) = block.verify_voting_keys() {
+            debug!(%error, %block, "Tendermint - await_proposal: Invalid validator voting keys");
             return Err(PushError::InvalidBlock(error));
         }
 
@@ -426,20 +511,33 @@ impl Blockchain {
                 .clone()
         };
 
+        // Verify that the header's body_root matches the hash of the actual body.
+        if *block.body_root() != body.hash() {
+            debug!(%block, "Tendermint - await_proposal: body_root does not match body hash");
+            return Err(PushError::InvalidBlock(BlockError::BodyHashMismatch));
+        }
+
         // Verify macro block state before committing accounts.
         if let Err(error) = self.verify_block_state_pre_commit(block, txn) {
             debug!(%error, %block, "Tendermint - await_proposal: Invalid macro block state");
             return Err(error);
         }
 
-        // Update our blockchain state using the received proposal. If we can't update the state, we
-        // return a proposal timeout.
-        if let Err(error) =
-            self.commit_accounts(block, None, &mut txn.into(), &mut BlockLogger::empty())
-        {
-            debug!(%error, %block, "Tendermint - await_proposal: Failed to commit accounts");
-            return Err(error);
-        }
+        // Update our blockchain state using the received proposal, recording the forward diff so we
+        // can verify it against the header's diff root. If we can't update the state, we return a
+        // proposal timeout.
+        let diff = {
+            let mut txn: TrieMdbxWriteTransaction = txn.into();
+            txn.start_recording();
+            if let Err(error) =
+                self.commit_accounts(block, None, &mut txn, &mut BlockLogger::empty())
+            {
+                debug!(%error, %block, "Tendermint - await_proposal: Failed to commit accounts");
+                return Err(error);
+            }
+            txn.stop_recording().into_forward_diff()
+        };
+        self.verify_diff_root(block, &diff)?;
 
         // Check the validity of the block against our state. If it is invalid, we return a proposal
         // timeout. This also returns the block body that matches the block header
@@ -477,7 +575,7 @@ impl Blockchain {
         }
 
         // Create a ChainInfo for the proposed block.
-        let chain_info = ChainInfo::from_block(block.clone(), &prev_info, prev_missing_range);
+        let chain_info = ChainInfo::from_block(block.clone(), &prev_info, prev_missing_range)?;
 
         let read_txn = self.read_transaction();
         // First the common ancestor of the two chains needs to be found.

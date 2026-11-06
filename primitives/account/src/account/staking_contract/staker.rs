@@ -127,7 +127,7 @@ impl Staker {
         if let Some(validator_address) = &self.delegation {
             // Funds are not released if release block height has not passed yet.
             if let Some(inactive_from) = self.inactive_from
-                && block_number < Policy::block_after_reporting_window(inactive_from)
+                && block_number < Policy::block_after_collateral_lockup(inactive_from)
             {
                 return false;
             }
@@ -203,6 +203,13 @@ impl StakingContract {
             });
         }
 
+        // Transaction-created stakers always use (zero, None), but genesis configurations can set
+        // these fields directly. Inactive stake and its inactivation height must either both be
+        // present or both be absent (invariants 3 and 4).
+        if inactive_balance.is_zero() != inactive_from.is_none() {
+            return Err(AccountError::InvalidForRecipient);
+        }
+
         // Check that the delegated validator exists.
         if let Some(validator_address) = &delegation {
             store.expect_validator(validator_address)?;
@@ -228,7 +235,7 @@ impl StakingContract {
         }
 
         // Update balance.
-        self.balance += value;
+        self.balance += value + inactive_balance;
 
         // Build the return logs
         tx_logger.push_log(Log::CreateStaker {
@@ -256,7 +263,7 @@ impl StakingContract {
 
         // Update our balance.
         assert_eq!(value, staker.active_balance);
-        self.balance -= value;
+        self.balance -= value + staker.inactive_balance;
 
         // If we are delegating to a validator, we need to update it.
         if let Some(validator_address) = &staker.delegation {

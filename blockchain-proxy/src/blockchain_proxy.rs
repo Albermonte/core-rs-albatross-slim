@@ -30,7 +30,7 @@ pub enum BlockchainProxy {
     #[cfg(feature = "full")]
     /// Full Blockchain, stores the full history, transactions, and full blocks.
     Full(Arc<RwLock<Blockchain>>),
-    /// Light Blockchain, stores only ZKPs, election macro blocks, and block header and their justification.
+    /// Light Blockchain, stores only election macro blocks, and block header and their justification.
     Light(Arc<RwLock<LightBlockchain>>),
 }
 
@@ -113,6 +113,10 @@ impl AbstractBlockchain for BlockchainReadProxy<'_> {
 
     fn election_head(&self) -> &MacroBlock {
         gen_blockchain_match!(self, BlockchainReadProxy, election_head)
+    }
+
+    fn protocol_version(&self) -> u16 {
+        gen_blockchain_match!(self, BlockchainReadProxy, protocol_version)
     }
 
     fn accounts_complete(&self) -> bool {

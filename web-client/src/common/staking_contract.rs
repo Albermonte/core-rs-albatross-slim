@@ -1,5 +1,7 @@
 use nimiq_serde::Deserialize;
-use nimiq_transaction::account::staking_contract::IncomingStakingTransactionData;
+use nimiq_transaction::account::staking_contract::{
+    IncomingStakingTransactionData, SignalDataUpdate,
+};
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "primitives")]
@@ -8,9 +10,9 @@ use crate::common::{
     signature_proof::SignatureProof,
     transaction::{
         PlainAddStakeData, PlainCreateStakerData, PlainCreateValidatorData, PlainRawData,
-        PlainRetireStakeData, PlainSetActiveStakeData, PlainTransactionProof,
-        PlainTransactionRecipientData, PlainUpdateStakerData, PlainUpdateValidatorData,
-        PlainValidatorData,
+        PlainRetireStakeData, PlainSetActiveStakeData, PlainSetSignalDataData,
+        PlainSignalDataUpdateMode, PlainTransactionProof, PlainTransactionRecipientData,
+        PlainUpdateStakerData, PlainUpdateValidatorData, PlainValidatorData,
     },
 };
 
@@ -127,6 +129,29 @@ impl StakingContract {
                 raw: hex::encode(bytes),
                 retire_stake: retire_stake.into(),
             }),
+            IncomingStakingTransactionData::SetSignalData {
+                validator_address,
+                update,
+                proof: _proof,
+            } => {
+                let (mode, new_signal_data, version) = match update {
+                    SignalDataUpdate::Full(signal_data) => (
+                        PlainSignalDataUpdateMode::Full,
+                        signal_data.map(hex::encode),
+                        None,
+                    ),
+                    SignalDataUpdate::Version(version) => {
+                        (PlainSignalDataUpdateMode::Version, None, Some(version))
+                    }
+                };
+                PlainTransactionRecipientData::SetSignalData(PlainSetSignalDataData {
+                    raw: hex::encode(bytes),
+                    validator: validator_address.to_user_friendly_address(),
+                    mode,
+                    new_signal_data,
+                    version,
+                })
+            }
         })
     }
 

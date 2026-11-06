@@ -29,7 +29,7 @@ jobs:
         - test: FourValidatorsReconnectSpammer
           devnet_args: -t .github/devnet_topologies/four_validators_spammer_1.toml -ut 250 -dt 30
         - test: MacroBlockProduction
-          # The number of blocks per epoch needs to stay the same (because of the ZKP keys)
+          # Keep the total number of blocks per epoch unchanged while making batches shorter.
           pre: "grep 'blocks_per_batch: 60,' primitives/src/policy.rs &&
                 grep 'batches_per_epoch: 720,' primitives/src/policy.rs &&
                 sed -i 's/blocks_per_batch: 60,/blocks_per_batch: 60 \\/ 30,/g' primitives/src/policy.rs &&
@@ -42,7 +42,7 @@ jobs:
                 sed -i 's/MIN_PRODUCER_TIMEOUT: u64 = 4 \\* 1000;/MIN_PRODUCER_TIMEOUT: u64 = 1000;/g' primitives/src/policy.rs"
           devnet_args: -t .github/devnet_topologies/four_validators_spammer_1.toml -k 0 -ut 100
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -50,10 +50,10 @@ jobs:
       with:
         tool-cache: true
         large-packages: false
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
       with:
-        python-version: '3.8'
+        python-version: '3.14'
     - name: Install python dependencies
       run: pip install scripts/devnet
     - name: Set up Rust toolchain
@@ -78,7 +78,7 @@ jobs:
       run: sed -i 's/url = "[^"]*"/url = "<redacted>"/g' temp-logs/*/conf/*/*.toml
     - name: Archive test results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: ${{ matrix.test }}-logs
           path: |

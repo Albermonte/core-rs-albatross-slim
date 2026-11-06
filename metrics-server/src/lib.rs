@@ -4,7 +4,7 @@ use nimiq_blockchain_proxy::BlockchainProxy;
 use nimiq_consensus::ConsensusProxy;
 use nimiq_mempool::mempool::Mempool;
 use nimiq_network_interface::network::Network;
-use nimiq_utils::spawn;
+use nimiq_utils::{spawn, Credentials};
 use parking_lot::RwLock;
 use prometheus_client::{
     encoding::{EncodeGaugeValue, EncodeMetric, MetricEncoder},
@@ -94,6 +94,7 @@ impl<T: EncodeGaugeValue + Sized + Debug> Debug for NumericClosureMetric<T> {
 
 pub fn start_metrics_server<TNetwork: Network>(
     addr: SocketAddr,
+    credentials: Option<Credentials>,
     blockchain_proxy: BlockchainProxy,
     mempool: Option<Arc<Mempool>>,
     consensus_proxy: ConsensusProxy<TNetwork>,
@@ -106,6 +107,15 @@ pub fn start_metrics_server<TNetwork: Network>(
     BlockMetrics::register(nimiq_registry, blockchain_proxy);
     ConsensusMetrics::register(nimiq_registry, consensus_proxy);
     NetworkMetrics::register(nimiq_registry, network);
+
+    // Checkpoint verification status (set by the blockchain checkpoint check in nimiq-genesis).
+    let checkpoint_mismatch =
+        NumericClosureMetric::new_gauge(Box::new(|| nimiq_genesis::checkpoint_mismatch() as i64));
+    nimiq_registry.register(
+        "checkpoint_mismatch",
+        "1 if the hardcoded checkpoint does not match the local chain, otherwise 0",
+        checkpoint_mismatch,
+    );
 
     if let Some(mempool) = mempool {
         MempoolMetrics::register(nimiq_registry, mempool);
@@ -138,7 +148,7 @@ pub fn start_metrics_server<TNetwork: Network>(
     }
 
     // Spawn the metrics server
-    spawn(async move { metrics_server(addr, registry).await.unwrap() });
+    spawn(async move { metrics_server(addr, registry, credentials).await.unwrap() });
 
     // Spawn Tokio task monitor updaters
     for task_monitor in task_monitors {

@@ -10,6 +10,7 @@ use nimiq_primitives::{
     account::{AccountError, AccountType},
     coin::Coin,
     networks::NetworkId,
+    policy::Policy,
     transaction::TransactionError,
 };
 use nimiq_serde::{Deserialize, Serialize};
@@ -110,7 +111,7 @@ fn it_can_serialize_a_vesting_contract() {
 fn it_can_create_contract_from_transaction() {
     let (accounts, _vesting_contract, key_1, _key_2) = init_tree();
 
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
 
     // Transaction 1
     let mut data: Vec<u8> = Vec::with_capacity(Address::SIZE + 8);
@@ -200,14 +201,14 @@ fn it_can_create_contract_from_transaction() {
     assert_eq!(contract.step_amount, 50.try_into().unwrap());
     assert_eq!(contract.total_amount, 100.try_into().unwrap());
 
-    // Transaction 3
+    // Transaction 3: valid 32-byte format (total_amount <= tx_value)
     let mut data: Vec<u8> = Vec::with_capacity(Address::SIZE + 32);
     let owner = Address::from([0u8; 20]);
     Serialize::serialize_to_writer(&owner, &mut data);
     Serialize::serialize_to_writer(&0u64.to_be_bytes(), &mut data);
     Serialize::serialize_to_writer(&100u64.to_be_bytes(), &mut data);
     Serialize::serialize_to_writer(&Coin::try_from(50).unwrap(), &mut data);
-    Serialize::serialize_to_writer(&Coin::try_from(150).unwrap(), &mut data);
+    Serialize::serialize_to_writer(&Coin::try_from(80).unwrap(), &mut data);
     tx.recipient_data = data;
     tx.recipient = tx.contract_creation_address();
 
@@ -232,9 +233,59 @@ fn it_can_create_contract_from_transaction() {
     assert_eq!(contract.start_time, 0);
     assert_eq!(contract.time_step, 100);
     assert_eq!(contract.step_amount, 50.try_into().unwrap());
-    assert_eq!(contract.total_amount, 150.try_into().unwrap());
+    assert_eq!(contract.total_amount, 80.try_into().unwrap());
 
-    // Transaction 4: invalid data
+    // Transaction 4: 32-byte format with total_amount > tx_value (rejected)
+    let mut data: Vec<u8> = Vec::with_capacity(Address::SIZE + 32);
+    Serialize::serialize_to_writer(&owner, &mut data);
+    Serialize::serialize_to_writer(&0u64.to_be_bytes(), &mut data);
+    Serialize::serialize_to_writer(&100u64.to_be_bytes(), &mut data);
+    Serialize::serialize_to_writer(&Coin::try_from(50).unwrap(), &mut data);
+    Serialize::serialize_to_writer(&Coin::try_from(150).unwrap(), &mut data);
+    tx.recipient_data = data;
+    tx.recipient = tx.contract_creation_address();
+
+    let mut tx_logger = TransactionLog::empty();
+    let result = accounts.test_create_new_contract::<VestingContract>(
+        &tx,
+        Coin::ZERO,
+        &block_state,
+        &mut tx_logger,
+        true,
+    );
+    assert_eq!(
+        result,
+        Err(AccountError::InvalidTransaction(
+            TransactionError::InvalidData
+        ))
+    );
+
+    // Transaction 5: 32-byte format with step_amount > total_amount (rejected)
+    let mut data: Vec<u8> = Vec::with_capacity(Address::SIZE + 32);
+    Serialize::serialize_to_writer(&owner, &mut data);
+    Serialize::serialize_to_writer(&0u64.to_be_bytes(), &mut data);
+    Serialize::serialize_to_writer(&100u64.to_be_bytes(), &mut data);
+    Serialize::serialize_to_writer(&Coin::try_from(80).unwrap(), &mut data);
+    Serialize::serialize_to_writer(&Coin::try_from(50).unwrap(), &mut data);
+    tx.recipient_data = data;
+    tx.recipient = tx.contract_creation_address();
+
+    let mut tx_logger = TransactionLog::empty();
+    let result = accounts.test_create_new_contract::<VestingContract>(
+        &tx,
+        Coin::ZERO,
+        &block_state,
+        &mut tx_logger,
+        true,
+    );
+    assert_eq!(
+        result,
+        Err(AccountError::InvalidTransaction(
+            TransactionError::InvalidData
+        ))
+    );
+
+    // Transaction 6: invalid data length
     tx.recipient_data = Vec::with_capacity(Address::SIZE + 2);
     Serialize::serialize_to_writer(&owner, &mut tx.recipient_data);
     Serialize::serialize_to_writer(&0u16.to_be_bytes(), &mut tx.recipient_data);
@@ -261,7 +312,7 @@ fn it_can_create_contract_from_transaction() {
 fn it_does_not_support_incoming_transactions() {
     let (accounts, mut vesting_contract, key_1, key_2) = init_tree();
 
-    let block_state = BlockState::new(1, 1);
+    let block_state = BlockState::new(1, 1, Policy::max_supported_version());
 
     let mut tx = Transaction::new_basic(
         Address::from(&key_1),
@@ -290,7 +341,7 @@ fn it_does_not_support_incoming_transactions() {
 fn it_can_apply_and_revert_valid_transaction() {
     let (accounts, mut vesting_contract, key_1, key_2) = init_tree();
 
-    let block_state = BlockState::new(2, 200);
+    let block_state = BlockState::new(2, 200, Policy::max_supported_version());
 
     let mut tx = Transaction::new_basic(
         Address::from(&key_1),
@@ -334,7 +385,7 @@ fn it_can_apply_and_revert_valid_transaction() {
         ]
     );
 
-    let block_state = BlockState::new(3, 400);
+    let block_state = BlockState::new(3, 400, Policy::max_supported_version());
 
     let mut tx_logger = TransactionLog::empty();
     let _ = accounts
@@ -369,7 +420,7 @@ fn it_refuses_invalid_transactions() {
     let signature_proof = SignatureProof::from_ed25519(key_1_alt.public, signature);
     tx.proof = signature_proof.serialize_to_vec();
 
-    let block_state = BlockState::new(1, 200);
+    let block_state = BlockState::new(1, 200, Policy::max_supported_version());
 
     let mut tx_logger = TransactionLog::empty();
     let result = accounts.test_commit_outgoing_transaction(
@@ -388,7 +439,7 @@ fn it_refuses_invalid_transactions() {
     let signature_proof = SignatureProof::from_ed25519(key_1.public, signature);
     tx.proof = signature_proof.serialize_to_vec();
 
-    let block_state = BlockState::new(100000, 100);
+    let block_state = BlockState::new(100000, 100, Policy::max_supported_version());
 
     let mut tx_logger = TransactionLog::empty();
     let result = accounts.test_commit_outgoing_transaction(
@@ -419,7 +470,7 @@ fn reserve_release_balance_works() {
     let sender_address = Address::from(&key_1);
     let data_store = accounts.data_store(&sender_address);
 
-    let block_state = BlockState::new(2, 200);
+    let block_state = BlockState::new(2, 200, Policy::max_supported_version());
 
     let mut reserved_balance = ReservedBalance::new(sender_address.clone());
     // -----------------------------------
@@ -482,6 +533,201 @@ fn reserve_release_balance_works() {
 }
 
 #[test]
+fn total_amount_exceeds_balance_panics_on_reserve_balance() {
+    // Attack scenario: attacker uses the 32-byte vesting creation format to set
+    // total_amount > transaction.value. This creates a contract where min_cap() can
+    // exceed self.balance. When an outgoing transaction triggers can_change_balance(),
+    // the error path computes `self.balance - min_cap` which panics on underflow.
+    //
+    // In the mempool path (reserve_balance), this runs inside a tokio::task::spawn,
+    // so the panic kills only the verification task — not the whole node process.
+    // However, in the block processing path (commit_outgoing_transaction), the panic
+    // unwinds through Blockchain::push which holds an RwLockUpgradableReadGuard.
+    // The poisoned lock makes the blockchain permanently unusable, effectively
+    // crashing the node.
+
+    let mut rng = test_rng(true);
+    let key_owner = KeyPair::generate(&mut rng);
+    let key_recipient = KeyPair::generate(&mut rng);
+
+    // Create a vesting contract where total_amount (2000) > balance (1000).
+    // This is reachable via the 32-byte CreationTransactionData format which
+    // deserializes total_amount from attacker-controlled recipient_data without
+    // validating total_amount <= tx_value.
+    let vesting_contract = VestingContract {
+        balance: Coin::from_u64_unchecked(1000),
+        owner: Address::from(&key_owner.public),
+        start_time: 0,
+        time_step: u64::MAX, // Ensures 0 steps elapsed, so min_cap = total_amount
+        step_amount: Coin::from_u64_unchecked(1),
+        total_amount: Coin::from_u64_unchecked(2000), // > balance!
+    };
+
+    let accounts = TestCommitRevert::with_initial_state(&[
+        (
+            Address::from(&key_owner.public),
+            Account::Basic(BasicAccount {
+                balance: Coin::from_u64_unchecked(1000),
+            }),
+        ),
+        (
+            Address([1u8; 20]),
+            Account::Vesting(vesting_contract.clone()),
+        ),
+    ]);
+
+    let mut db_txn = accounts.env().write_transaction();
+    let sender_address = Address::from(&key_owner);
+    let data_store = accounts.data_store(&sender_address);
+
+    // Block time 0 with time_step=MAX means 0 steps have elapsed, so
+    // min_cap = total_amount = 2000 > balance = 1000.
+    let block_state = BlockState::new(1, 0, Policy::max_supported_version());
+
+    let mut reserved_balance = ReservedBalance::new(sender_address.clone());
+
+    // Outgoing transaction for 1 luna — the amount doesn't matter,
+    // any outgoing tx triggers the panic because min_cap > balance.
+    let tx = make_signed_transaction(key_owner.clone(), key_recipient.clone(), 1);
+
+    // This panics in can_change_balance at:
+    //   balance: self.balance - min_cap  →  1000 - 2000  →  underflow panic
+    //
+    // After the fix, this should return Err(AccountError::InsufficientFunds)
+    // without panicking.
+    let result = vesting_contract.reserve_balance(
+        &tx,
+        &mut reserved_balance,
+        &block_state,
+        data_store.read(&mut db_txn),
+    );
+    assert!(
+        result.is_err(),
+        "Expected InsufficientFunds error, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn total_amount_exceeds_balance_panics_on_commit_outgoing() {
+    // Same root cause as above, but triggered via commit_outgoing_transaction —
+    // the block processing path. This is the more dangerous path because it runs
+    // while holding the blockchain RwLock, poisoning it on panic.
+
+    let mut rng = test_rng(true);
+    let key_owner = KeyPair::generate(&mut rng);
+    let key_recipient = KeyPair::generate(&mut rng);
+
+    let mut vesting_contract = VestingContract {
+        balance: Coin::from_u64_unchecked(1000),
+        owner: Address::from(&key_owner.public),
+        start_time: 0,
+        time_step: u64::MAX,
+        step_amount: Coin::from_u64_unchecked(1),
+        total_amount: Coin::from_u64_unchecked(2000),
+    };
+
+    let accounts = TestCommitRevert::with_initial_state(&[
+        (
+            Address::from(&key_owner.public),
+            Account::Basic(BasicAccount {
+                balance: Coin::from_u64_unchecked(1000),
+            }),
+        ),
+        (
+            Address([1u8; 20]),
+            Account::Vesting(vesting_contract.clone()),
+        ),
+    ]);
+
+    let block_state = BlockState::new(1, 0, Policy::max_supported_version());
+    let tx = make_signed_transaction(key_owner.clone(), key_recipient.clone(), 1);
+
+    // This panics in can_change_balance during commit_outgoing_transaction.
+    // After the fix, this should return Err(AccountError::InsufficientFunds).
+    let mut tx_logger = TransactionLog::empty();
+    let result = accounts.test_commit_outgoing_transaction(
+        &mut vesting_contract,
+        &tx,
+        &block_state,
+        &mut tx_logger,
+        true,
+    );
+    assert!(
+        result.is_err(),
+        "Expected InsufficientFunds error, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn max_start_time_does_not_panic_on_outgoing() {
+    // `min_cap` must not panic for contracts with extreme `start_time`
+    // values. Returns `InsufficientFunds` in both mempool and block paths.
+
+    let mut rng = test_rng(true);
+    let key_owner = KeyPair::generate(&mut rng);
+    let key_recipient = KeyPair::generate(&mut rng);
+
+    let mut vesting_contract = VestingContract {
+        balance: Coin::from_u64_unchecked(1000),
+        owner: Address::from(&key_owner.public),
+        start_time: u64::MAX,
+        time_step: 1,
+        step_amount: Coin::from_u64_unchecked(1),
+        total_amount: Coin::from_u64_unchecked(1000),
+    };
+
+    let accounts = TestCommitRevert::with_initial_state(&[
+        (
+            Address::from(&key_owner.public),
+            Account::Basic(BasicAccount {
+                balance: Coin::from_u64_unchecked(1000),
+            }),
+        ),
+        (
+            Address([1u8; 20]),
+            Account::Vesting(vesting_contract.clone()),
+        ),
+    ]);
+
+    let block_state = BlockState::new(1, 1_700_000_000_000, Policy::max_supported_version());
+    let tx = make_signed_transaction(key_owner.clone(), key_recipient.clone(), 1);
+
+    let sender_address = Address::from(&key_owner);
+    let data_store = accounts.data_store(&sender_address);
+    let mut reserved_balance = ReservedBalance::new(sender_address.clone());
+    {
+        let mut db_txn = accounts.env().write_transaction();
+        let result = vesting_contract.reserve_balance(
+            &tx,
+            &mut reserved_balance,
+            &block_state,
+            data_store.read(&mut db_txn),
+        );
+        assert!(
+            matches!(result, Err(AccountError::InsufficientFunds { .. })),
+            "Expected InsufficientFunds, got: {:?}",
+            result
+        );
+    }
+
+    let mut tx_logger = TransactionLog::empty();
+    let result = accounts.test_commit_outgoing_transaction(
+        &mut vesting_contract,
+        &tx,
+        &block_state,
+        &mut tx_logger,
+        true,
+    );
+    assert!(
+        matches!(result, Err(AccountError::InsufficientFunds { .. })),
+        "Expected InsufficientFunds, got: {:?}",
+        result
+    );
+}
+
+#[test]
 fn can_reserve_balance_after_time_step() {
     // -----------------------------------
     // Test setup:
@@ -491,7 +737,7 @@ fn can_reserve_balance_after_time_step() {
     let sender_address = Address::from(&key_1);
     let data_store = accounts.data_store(&sender_address);
 
-    let block_state = BlockState::new(2, 200);
+    let block_state = BlockState::new(2, 200, Policy::max_supported_version());
 
     let mut reserved_balance = ReservedBalance::new(sender_address.clone());
     // -----------------------------------
@@ -526,7 +772,7 @@ fn can_reserve_balance_after_time_step() {
     );
 
     // Advancing the block state should allow further reserve balance.
-    let block_state = BlockState::new(3, 300);
+    let block_state = BlockState::new(3, 300, Policy::max_supported_version());
 
     let tx = make_signed_transaction(key_1.clone(), key_2.clone(), 100);
     let result = vesting_contract.reserve_balance(

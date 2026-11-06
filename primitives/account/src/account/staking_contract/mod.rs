@@ -162,6 +162,10 @@ impl StakingContract {
 
         let mut rng = seed.rng(VrfUseCase::ValidatorSlotSelection);
 
+        assert!(
+            !validator_stakes.is_empty(),
+            "Cannot select validators: no active validators exist"
+        );
         let lookup = DiscreteDistribution::new(&validator_stakes);
 
         let mut slots_builder = ValidatorsBuilder::default();
@@ -240,6 +244,42 @@ impl StakingContract {
             .sum()
     }
 
+    /// Returns whether an upgrade to `new_version` has enough support to be triggered.
+    ///
+    /// An upgrade requires at least `Policy::UPGRADE_MIN_SUPPORT` percent of *both*:
+    /// - the elected slots of the current epoch (`validators`), and
+    /// - the active stake,
+    ///
+    /// to signal support for `new_version`. Both conditions are needed: the slot threshold ensures
+    /// the current committee can finalize the version-bumped election block, while the stake
+    /// threshold bounds how much of the active set gets deactivated by the upgrade.
+    /// This predicate is the single source of truth shared by the block proposer and the block
+    /// validation, keeping both sides symmetric.
+    ///
+    /// IMPORTANT: This is a fairly expensive function, iterating over all validators.
+    pub fn supports_version_upgrade<T: DataStoreReadOps + DataStoreIterOps>(
+        &self,
+        data_store: &T,
+        validators: &Validators,
+        new_version: u16,
+    ) -> bool {
+        let support_check = |data| Policy::supports_upgrade(data, new_version);
+
+        // `Policy::UPGRADE_MIN_SUPPORT` of the elected slots must support the upgrade.
+        let supporting_slots = self.get_supporting_slots(data_store, validators, support_check);
+        if u64::from(supporting_slots) * 100
+            < u64::from(Policy::SLOTS) * Policy::UPGRADE_MIN_SUPPORT
+        {
+            return false;
+        }
+
+        // `Policy::UPGRADE_MIN_SUPPORT` of the active stake must support the upgrade.
+        let supporting_stake = self.get_supporting_stake(data_store, support_check);
+        let total_active_stake = self.get_active_stake();
+        u64::from(supporting_stake) * 100
+            >= u64::from(total_active_stake) * Policy::UPGRADE_MIN_SUPPORT
+    }
+
     /// Deactivates validators that did not support the upgrade.
     /// The support is determined by a function over the signal data.
     /// IMPORTANT: This is a fairly expensive function, iterating over all validators.
@@ -254,8 +294,8 @@ impl StakingContract {
         // Retrieve unsupporting validators.
         let unsupporting_validators: Vec<_> = self
             .active_validators
-            .iter()
-            .filter_map(|(validator_address, _stake)| {
+            .keys()
+            .filter_map(|validator_address| {
                 let validator = store
                     .get_validator(validator_address)
                     .expect("Active Validators must be present in the Staking Contract.");

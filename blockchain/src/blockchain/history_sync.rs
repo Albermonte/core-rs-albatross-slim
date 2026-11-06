@@ -78,7 +78,8 @@ impl Blockchain {
         }
 
         // Perform block intrinsic checks.
-        block.verify(this.network_id)?;
+        let max_timestamp = this.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        block.verify(this.network_id, max_timestamp)?;
 
         // Verify that the block is a valid successor to the current macro head.
         block.verify_macro_successor(this.state.macro_info.head.unwrap_macro_ref())?;
@@ -151,7 +152,9 @@ impl Blockchain {
                 break;
             }
             if let HistoricTransactionData::Basic(tx) = &history[i].data {
-                cum_tx_fees += tx.get_raw_transaction().fee;
+                cum_tx_fees = cum_tx_fees
+                    .checked_add(tx.get_raw_transaction().fee)
+                    .ok_or(PushError::InvalidBlock(BlockError::TransactionFeeOverflow))?;
             }
             cum_hist_tx_size += history[i].data.serialized_size() as u64;
         }
@@ -193,50 +196,75 @@ impl Blockchain {
         // We know it comes sorted because we already checked it against the history root and
         // historic transactions in the history tree come sorted by block number and type.
         // Ignore the historic transactions that were already added in past macro blocks.
-        let mut block_numbers = vec![];
-        let mut block_timestamps = vec![];
+        let mut block_state = vec![];
         let mut block_transactions = vec![];
         let mut block_inherents = vec![];
 
-        let mut prev_batch = 0;
-        let mut prev_block = 0;
+        // The first checkpoint block after genesis is the only macro block that can legitimately
+        // have no history items: rewards are paid one batch late and batch 0 (genesis) is finalized
+        // by definition. Every later macro block carries reward items, burned rewards included.
+        // This relies on every batch minting a non-zero reward, which holds as long as the supply
+        // is not exhausted. A chain whose genesis supply already equals the total supply could not
+        // sync an empty batch.
+        let first_checkpoint = Policy::macro_block_after(Policy::genesis_block_number());
 
         for hist_tx in history.iter().skip(first_new_hist_tx) {
+            // The last block whose state is applied before this history item. Before the first new
+            // history item, this is the last macro block of our head. The in-memory head is stale
+            // after `revert_to_common_state`, but reverts never go below its last macro block.
+            let mut prev_block = block_state.last().map_or(
+                Policy::last_macro_block(this.block_number()),
+                |block_state: &BlockState| block_state.number,
+            );
+
             if hist_tx.block_number > prev_block {
-                // If a macro block does not have any history items, we need to add it here so that
-                // we always commit FinalizeBatch/FinalizeEpoch inherents.
-                // FIXME We're missing the block timestamp to do this correctly.
-                //  Also, this works only if a single macro block is missing between history items.
-                let batch_number = Policy::batch_at(hist_tx.block_number);
-                if batch_number > prev_batch
-                    && block_numbers
-                        .last()
-                        .map(|block_number| !Policy::is_macro_block_at(*block_number))
-                        .unwrap_or(false)
-                {
+                // If the first checkpoint block is neither part of our chain nor of the history, we
+                // need to add it here so that its FinalizeBatch inherent is still committed.
+                if prev_block < first_checkpoint && hist_tx.block_number > first_checkpoint {
                     debug!(
                         history_item_block_number = hist_tx.block_number,
                         prev_block,
-                        history_item_batch = batch_number,
-                        prev_batch,
-                        last_block_number = ?block_numbers.last(),
-                        "Inserting macro block"
+                        "Adding the first checkpoint block manually since there weren't any txs on it."
                     );
-                    assert_eq!(batch_number, prev_batch + 1, "Missing batch");
 
-                    block_numbers.push(Policy::macro_block_of(prev_batch).unwrap());
-                    block_timestamps.push(0); // FIXME
+                    block_state.push(BlockState {
+                        number: first_checkpoint,
+                        // The timestamp is only read when committing transactions to vesting and
+                        // HTLC contracts. This block only commits the FinalizeBatch inherent.
+                        time: 0,
+                        protocol_version: this.state.current_version(), // Cannot change, protocol version upgrades only on election blocks.
+                    });
                     block_transactions.push(vec![]);
                     block_inherents.push(vec![]);
+
+                    prev_block = first_checkpoint;
                 }
 
-                block_numbers.push(hist_tx.block_number);
-                block_timestamps.push(hist_tx.block_time);
+                // Every other macro block must have history items, otherwise we would never commit
+                // its FinalizeBatch/FinalizeEpoch inherents.
+                let next_macro_block = Policy::macro_block_after(prev_block);
+                if hist_tx.block_number > next_macro_block {
+                    warn!(
+                        %block,
+                        reason = "missing macro block in history",
+                        history_item_block_number = hist_tx.block_number,
+                        missing_macro_block = next_macro_block,
+                        "Rejecting block",
+                    );
+                    txn.abort();
+                    #[cfg(feature = "metrics")]
+                    this.metrics.note_invalid_block();
+                    return Err(PushError::InvalidBlock(BlockError::InvalidHistoryRoot));
+                }
+
+                // Push the block of the historic transaction.
+                block_state.push(BlockState {
+                    number: hist_tx.block_number,
+                    time: hist_tx.block_time,
+                    protocol_version: this.state.current_version(), // Cannot change, protocol version upgrades only on election blocks.
+                });
                 block_transactions.push(vec![]);
                 block_inherents.push(vec![]);
-
-                prev_batch = batch_number;
-                prev_block = hist_tx.block_number;
             }
 
             match &hist_tx.data {
@@ -277,17 +305,20 @@ impl Blockchain {
         }
 
         // Add the final macro block (the one we're proving against) if it's not included yet.
-        if block_numbers
+        if block_state
             .last()
-            .map(|block_number| *block_number != block.block_number())
+            .map(|block_state| block_state.number != block.block_number())
             .unwrap_or(true)
         {
             debug!(
                 block_number = block.block_number(),
                 "Inserting final macro block"
             );
-            block_numbers.push(block.block_number());
-            block_timestamps.push(block.timestamp());
+            block_state.push(BlockState {
+                number: block.block_number(),
+                time: block.timestamp(),
+                protocol_version: block.version(),
+            });
             block_transactions.push(vec![]);
             block_inherents.push(vec![]);
         }
@@ -295,19 +326,26 @@ impl Blockchain {
         // We go over the blocks one more time and add the FinalizeBatch and FinalizeEpoch inherents
         // to the macro blocks. This is necessary because the History Store doesn't store those inherents
         // so we need to add them again in order to correctly sync.
-        for (i, block_number) in block_numbers.iter().enumerate() {
-            if Policy::is_macro_block_at(*block_number) {
+        for (i, block_state) in block_state.iter().enumerate() {
+            if Policy::is_macro_block_at(block_state.number) {
                 block_inherents
                     .get_mut(i)
                     .unwrap()
                     .push(Inherent::FinalizeBatch);
 
-                if Policy::is_election_block_at(*block_number) {
-                    assert_eq!(
-                        *block_number,
-                        block.block_number(),
-                        "Only the last block can be an election block"
-                    );
+                if Policy::is_election_block_at(block_state.number) {
+                    if block_state.number != block.block_number() {
+                        warn!(
+                            %block,
+                            reason = "foreign election block in history",
+                            history_block_number = block_state.number,
+                            "Rejecting block",
+                        );
+                        txn.abort();
+                        #[cfg(feature = "metrics")]
+                        this.metrics.note_invalid_block();
+                        return Err(PushError::InvalidBlock(BlockError::InvalidHistoryRoot));
+                    }
                     block_inherents
                         .get_mut(i)
                         .unwrap()
@@ -341,7 +379,7 @@ impl Blockchain {
         }
 
         // Update the accounts tree, one block at a time.
-        for i in 0..block_numbers.len() {
+        for i in 0..block_state.len() {
             // Extract the transactions from the block
             let txns: Vec<Transaction> = block_transactions[i]
                 .iter()
@@ -349,12 +387,11 @@ impl Blockchain {
                 .collect();
 
             // Commit block to AccountsTree and create the receipts.
-            let block_state = BlockState::new(block_numbers[i], block_timestamps[i]);
             let receipts = this.state.accounts.commit_batch(
                 &mut (&mut txn).into(),
                 &txns,
                 &block_inherents[i],
-                &block_state,
+                &block_state[i],
                 &mut BlockLogger::empty(),
             );
 
@@ -363,7 +400,7 @@ impl Blockchain {
                 warn!(
                     %block,
                     reason = "commit of block failed",
-                    block_no = block_numbers[i],
+                    block_no = block_state[i].number,
                     num_transactions = block_transactions[i].len(),
                     num_inherents = block_inherents[i].len(),
                     error = &e as &dyn Error,
@@ -444,6 +481,7 @@ impl Blockchain {
 
         // Update the blockchain state.
         let mut this = RwLockUpgradableReadGuard::upgrade(this);
+        let old_version = this.state.current_version();
         this.state.main_chain = chain_info.clone();
         this.state.head_hash = block_hash.clone();
         this.state.macro_info = chain_info;
@@ -452,6 +490,13 @@ impl Blockchain {
         // Check if this block is an election block.
         let is_election_block = macro_block.is_election();
         if is_election_block {
+            // Verify the hardcoded checkpoint (if any) against our own chain.
+            nimiq_genesis::verify_election_checkpoint(
+                this.network_id,
+                macro_block.block_number(),
+                &block_hash,
+            );
+
             this.state.election_head = macro_block.clone();
             this.state.election_head_hash = block_hash.clone();
             this.state.previous_slots = this.state.current_slots.take();
@@ -481,8 +526,16 @@ impl Blockchain {
 
         if is_election_block {
             this.notifier
-                .send(BlockchainEvent::EpochFinalized(block_hash))
+                .send(BlockchainEvent::EpochFinalized(block_hash.clone()))
                 .ok();
+            if old_version < this.state.current_version() {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        block_hash,
+                        this.state.current_version(),
+                    ))
+                    .ok();
+            }
         } else {
             this.notifier
                 .send(BlockchainEvent::Finalized(block_hash))
@@ -606,8 +659,8 @@ impl Blockchain {
                 *prev_info.head.state_root(),
                 accounts_hash,
                 "Inconsistent state after reverting block {} - {:?}",
-                &current_info.head,
-                &current_info.head,
+                current_info.head,
+                current_info.head,
             );
 
             // Move on to the next block.

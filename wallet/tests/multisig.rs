@@ -5,7 +5,8 @@ use nimiq_keys::{
     multisig::{commitment::CommitmentPair, CommitmentsBuilder},
     Address, KeyPair, PrivateKey,
 };
-use nimiq_primitives::{coin::Coin, networks::NetworkId};
+use nimiq_primitives::{coin::Coin, networks::NetworkId, policy::Policy};
+use nimiq_test_log::test;
 use nimiq_wallet::MultiSigAccount;
 
 static PRIVATE_KEYS: &[&str] = &[
@@ -44,13 +45,15 @@ pub fn it_can_create_valid_transactions() {
             kp2.public,
             CommitmentPair::to_commitments(&commitment_pairs2),
         )
-        .build(&transaction.serialize_content());
+        .build(&transaction.serialize_content())
+        .unwrap();
     let data2 = CommitmentsBuilder::with_private_commitments(kp2.public, commitment_pairs2)
         .with_signer(
             kp1.public,
             CommitmentPair::to_commitments(&commitment_pairs1),
         )
-        .build(&transaction.serialize_content());
+        .build(&transaction.serialize_content())
+        .unwrap();
 
     assert_eq!(data1.aggregate_public_key, data2.aggregate_public_key);
     assert_eq!(data1.aggregate_commitment, data2.aggregate_commitment);
@@ -73,7 +76,9 @@ pub fn it_can_create_valid_transactions() {
         )
         .unwrap();
 
-    assert!(tx.verify(NetworkId::UnitAlbatross).is_ok())
+    for v in 0..=Policy::max_supported_version() {
+        assert!(tx.verify(NetworkId::UnitAlbatross, v).is_ok());
+    }
 }
 
 #[test]
@@ -115,9 +120,12 @@ pub fn aggregated_public_key_order_does_not_matter() {
     let kp2 = KeyPair::from(PrivateKey::from_hex(PRIVATE_KEYS[1]).unwrap());
     let kp3 = KeyPair::from(PrivateKey::from_hex(PRIVATE_KEYS[2]).unwrap());
 
-    let pk1 = MultiSigAccount::aggregate_public_keys(&[kp1.public, kp2.public, kp3.public]);
-    let pk2 = MultiSigAccount::aggregate_public_keys(&[kp2.public, kp3.public, kp1.public]);
-    let pk3 = MultiSigAccount::aggregate_public_keys(&[kp3.public, kp2.public, kp1.public]);
+    let pk1 =
+        MultiSigAccount::aggregate_public_keys(&[kp1.public, kp2.public, kp3.public]).unwrap();
+    let pk2 =
+        MultiSigAccount::aggregate_public_keys(&[kp2.public, kp3.public, kp1.public]).unwrap();
+    let pk3 =
+        MultiSigAccount::aggregate_public_keys(&[kp3.public, kp2.public, kp1.public]).unwrap();
 
     assert_eq!(pk1, pk2);
     assert_eq!(pk1, pk3);

@@ -66,7 +66,7 @@ impl ValidityStartHeight {
     pub fn block_number(self, current_block_number: u32) -> u32 {
         match self {
             Self::Absolute(n) => n,
-            Self::Relative(n) => n + current_block_number,
+            Self::Relative(n) => n.saturating_add(current_block_number),
         }
     }
 }
@@ -1093,6 +1093,7 @@ pub enum LogType {
     ValidatorFeeDeduction,
     DeactivateValidator,
     ReactivateValidator,
+    SetSignalData,
 
     RetireValidator,
     DeleteValidator,
@@ -1146,6 +1147,7 @@ impl LogType {
             Log::UpdateValidator { .. } => Self::UpdateValidator,
             Log::DeactivateValidator { .. } => Self::DeactivateValidator,
             Log::ReactivateValidator { .. } => Self::ReactivateValidator,
+            Log::SetSignalData { .. } => Self::SetSignalData,
 
             Log::CreateStaker { .. } => Self::CreateStaker,
             Log::Stake { .. } => Self::Stake,
@@ -1181,29 +1183,6 @@ pub fn is_of_log_type_and_related_to_addresses(
     let matches_addresses =
         addresses.is_empty() || addresses.iter().any(|addr| log.is_related_to_address(addr));
     matches_log_types && matches_addresses
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct ZKPState {
-    latest_block: Block,
-    latest_proof: Option<String>,
-}
-
-impl ZKPState {
-    pub fn with_zkp_state(zkp_state: &nimiq_zkp_component::types::ZKPState) -> Self {
-        let latest_block =
-            Block::from_macro_block(None, zkp_state.latest_block.clone(), true).unwrap();
-        let latest_proof = zkp_state
-            .latest_proof
-            .as_ref()
-            .map(|latest_proof| format!("{latest_proof:?}"));
-
-        Self {
-            latest_block,
-            latest_proof,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

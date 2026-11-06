@@ -1,7 +1,10 @@
 use nimiq_bls::{CompressedPublicKey as BlsPublicKey, CompressedSignature as BlsSignature};
 use nimiq_hash::Blake2bHash;
 use nimiq_keys::{Address, Ed25519PublicKey as SchnorrPublicKey};
-use nimiq_primitives::{coin::Coin, policy::Policy};
+use nimiq_primitives::{
+    coin::Coin,
+    policy::{upgrades, Policy},
+};
 use nimiq_serde::{Deserialize, DeserializeError, Serialize, SerializedMaxSize};
 
 use crate::{SignatureProof, Transaction, TransactionError};
@@ -85,6 +88,27 @@ pub enum IncomingStakingTransactionData {
         retire_stake: Coin,
         proof: SignatureProof,
     },
+    SetSignalData {
+        validator_address: Address,
+        update: SignalDataUpdate,
+        // This proof is signed with the validator warm key.
+        proof: SignatureProof,
+    },
+}
+
+/// Specifies how a [`SetSignalData`](IncomingStakingTransactionData::SetSignalData) transaction
+/// updates a validator's `signal_data` field.
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedMaxSize)]
+#[repr(u8)]
+pub enum SignalDataUpdate {
+    /// Replaces the *entire* `signal_data` field. `None` clears it (the only way to reach a `None`
+    /// signal data); `Some(hash)` sets it verbatim. This overwrites any previously signaled version.
+    Full(Option<Blake2bHash>),
+    /// Sets *only* the protocol-version bytes (the first two bytes, big-endian) to `version`,
+    /// preserving the rest of `signal_data`. Unlike [`SignalDataUpdate::Full`], this is a
+    /// non-destructive partial update and always yields a present (`Some`) value — clearing the
+    /// whole field is a `Full` operation. Pass `0` to zero the version bytes.
+    Version(u16),
 }
 
 impl IncomingStakingTransactionData {
@@ -98,6 +122,7 @@ impl IncomingStakingTransactionData {
                 | IncomingStakingTransactionData::UpdateStaker { .. }
                 | IncomingStakingTransactionData::SetActiveStake { .. }
                 | IncomingStakingTransactionData::RetireStake { .. }
+                | IncomingStakingTransactionData::SetSignalData { .. }
         )
     }
 
@@ -105,7 +130,11 @@ impl IncomingStakingTransactionData {
         Ok(Self::deserialize_all(&transaction.recipient_data)?)
     }
 
-    pub fn verify(&self, transaction: &Transaction) -> Result<(), TransactionError> {
+    pub fn verify(
+        &self,
+        transaction: &Transaction,
+        protocol_version: u16,
+    ) -> Result<(), TransactionError> {
         match self {
             IncomingStakingTransactionData::CreateValidator {
                 voting_key,
@@ -144,10 +173,11 @@ impl IncomingStakingTransactionData {
                 }
 
                 // Check proof of knowledge, if necessary.
-                if let (Some(new_voting_key), Some(new_proof_of_knowledge)) =
-                    (new_voting_key, new_proof_of_knowledge)
-                {
-                    verify_proof_of_knowledge(new_voting_key, new_proof_of_knowledge)?;
+                match (new_voting_key, new_proof_of_knowledge) {
+                    (Some(key), Some(pok)) => verify_proof_of_knowledge(key, pok)?,
+                    (Some(_), None) => return Err(TransactionError::InvalidData),
+                    (None, Some(_)) => return Err(TransactionError::InvalidData),
+                    (None, None) => {} // no key change, nothing to verify
                 }
 
                 // Check that the signature is correct.
@@ -205,6 +235,24 @@ impl IncomingStakingTransactionData {
                 // Check that the signature is correct.
                 verify_transaction_signature(transaction, proof)?
             }
+            IncomingStakingTransactionData::SetSignalData { proof, .. } => {
+                // Setting the signal data with the warm key is only allowed once the protocol has
+                // upgraded to the version that introduces this transaction. Before that the
+                // transaction must be rejected, otherwise nodes that have not upgraded yet would
+                // diverge.
+                if protocol_version < upgrades::v2::WARM_KEY_SIGNALING {
+                    warn!(
+                        min_protocol_version = upgrades::v2::WARM_KEY_SIGNALING,
+                        protocol_version,
+                        ?transaction,
+                        "SetSignalData transactions are not allowed before the warm-key signaling upgrade"
+                    );
+                    return Err(TransactionError::InvalidForVersion);
+                }
+
+                // Check that the signature is correct.
+                verify_transaction_signature(transaction, proof)?
+            }
         }
 
         Ok(())
@@ -220,7 +268,8 @@ impl IncomingStakingTransactionData {
             | IncomingStakingTransactionData::CreateStaker { proof, .. }
             | IncomingStakingTransactionData::UpdateStaker { proof, .. }
             | IncomingStakingTransactionData::SetActiveStake { proof, .. }
-            | IncomingStakingTransactionData::RetireStake { proof, .. } => {
+            | IncomingStakingTransactionData::RetireStake { proof, .. }
+            | IncomingStakingTransactionData::SetSignalData { proof, .. } => {
                 *proof = signature_proof;
             }
             IncomingStakingTransactionData::AddStake { .. } => {}
@@ -254,6 +303,16 @@ pub fn verify_transaction_signature(
     transaction: &Transaction,
     sig_proof: &SignatureProof,
 ) -> Result<(), TransactionError> {
+    // Reject the all-zero (default) public key as a signer. It is a verification wildcard
+    // (see `SignatureProof::is_default_public_key`)
+    if sig_proof.is_default_public_key() {
+        warn!(
+            ?transaction,
+            "Rejecting staking transaction signed with the default (all-zero) public key",
+        );
+        return Err(TransactionError::InvalidProof);
+    }
+
     // If we are verifying the signature on an incoming transaction, then we need to reset the
     // signature field first.
     let tx = {

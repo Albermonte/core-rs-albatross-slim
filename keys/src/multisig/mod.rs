@@ -7,7 +7,7 @@ use curve25519_dalek::{
 };
 use nimiq_hash::{sha512::Sha512Hasher, Hasher};
 use nimiq_utils::key_rng::SecureGenerate;
-use rand::{CryptoRng, Rng, RngCore};
+use rand::{CryptoRng, Rng};
 use sha2::{self, Digest, Sha512};
 
 use self::{
@@ -88,8 +88,8 @@ pub struct CommitmentsBuilder {
 }
 
 impl CommitmentsBuilder {
-    /// Creates new commitment pairs from an Rng.
-    pub fn new<R: Rng + RngCore + CryptoRng>(
+    /// Creates new commitment pairs from an RNG.
+    pub fn new<R: Rng + CryptoRng>(
         own_public_key: Ed25519PublicKey,
         rng: &mut R,
     ) -> CommitmentsBuilder {
@@ -156,9 +156,9 @@ impl CommitmentsBuilder {
     }
 
     /// Creates the aggregate commitment and additional data for the content to be signed.
-    pub fn build(mut self, content: &[u8]) -> CommitmentsData {
+    pub fn build(mut self, content: &[u8]) -> Result<CommitmentsData, PartialSignatureError> {
         self.all_public_keys.sort();
-        let aggregate_public_key = DelinearizedPublicKey::sum_delinearized(&self.all_public_keys);
+        let aggregate_public_key = DelinearizedPublicKey::sum_delinearized(&self.all_public_keys)?;
 
         let mut partial_agg_commitments = Vec::with_capacity(MUSIG2_PARAMETER_V);
 
@@ -193,14 +193,14 @@ impl CommitmentsBuilder {
             agg_commitment_edwards += partial_agg_commitment.0 * scale;
         }
 
-        CommitmentsData {
+        Ok(CommitmentsData {
             nonces: self.nonces,
             commitments: self.all_commitments[0],
             aggregate_public_key,
             aggregate_commitment: Commitment(agg_commitment_edwards),
             all_public_keys: self.all_public_keys,
             b,
-        }
+        })
     }
 }
 
@@ -279,7 +279,10 @@ impl Ed25519PublicKey {
 
     /// Delinearizes a public key by multiplying it with a scalar derived from the hash and the public key itself.
     /// Effective delinearization for multisigs should use the hash over all public keys as an input.
-    pub(crate) fn delinearize(&self, public_keys_hash: &[u8; 64]) -> EdwardsPoint {
+    pub(crate) fn delinearize(
+        &self,
+        public_keys_hash: &[u8; 64],
+    ) -> Result<EdwardsPoint, PartialSignatureError> {
         // Compute H(C||P).
         let mut h: Sha512 = Sha512::default();
 
@@ -287,10 +290,11 @@ impl Ed25519PublicKey {
         h.update(self.as_bytes());
         let s = Scalar::from_hash::<Sha512>(h);
 
-        // Should always work, since we come from a valid public key.
-        let p = self.to_edwards_point().unwrap();
+        let p = self
+            .to_edwards_point()
+            .ok_or(PartialSignatureError::InvalidCurvePoint)?;
         // Compute H(C||P)*P.
-        s * p
+        Ok(s * p)
     }
 
     pub fn verify_partial(
@@ -303,7 +307,10 @@ impl Ed25519PublicKey {
         let public_keys_hash = hash_public_keys(&commitments_data.all_public_keys);
         // And delinearize them.
         // Note that here we delinearize as p^{H(H(pks), p)}, e.g., with an additional hash due to the function delinearize_private_key
-        let delinearized_public_key = self.delinearize(&public_keys_hash);
+        let delinearized_public_key = match self.delinearize(&public_keys_hash) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
 
         // Compute c = H(R, apk, m)
         let mut hasher = Sha512Hasher::new();
@@ -360,7 +367,12 @@ impl ToScalar for ::ed25519_zebra::SigningKey {
         scalar_bytes[31] |= 64;
         // The above bit operations ensure that the integer represented by
         // `scalar_bytes` is less than 2^255-19 as required by this function.
-        #[allow(deprecated)]
-        Scalar::from_bits(scalar_bytes)
+        //
+        // CONSENSUS-CRITICAL. Stored REDUCED (`a mod l`); see the matching note in
+        // `PrivateKey::to_scalar`. Reduction is output-preserving because the secret scalar is only
+        // ever multiplied by an order-`l` point or a reduced scalar, proven byte-for-byte by the
+        // `scalar_reduction_equivalence` fuzz test. This replaces the deprecated `from_bits` and
+        // lets us drop the `legacy_compatibility` feature. Do NOT revert to `from_bits`.
+        Scalar::from_bytes_mod_order(scalar_bytes)
     }
 }

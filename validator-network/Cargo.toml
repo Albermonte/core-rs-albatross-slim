@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Nimiq's validator network abstraction in Rust"
 homepage.workspace = true
 repository.workspace = true
@@ -20,14 +21,13 @@ maintenance = { status = "experimental" }
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
 futures = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
 serde = "1.0"
 thiserror = "2.0"
 time = { version = "0.3" }
-tokio = { version = "1.49", features = ["rt"] }
+tokio = { version = "1.52", features = ["rt"] }
 
 nimiq-keys = { workspace = true, features = ["serde-derive"] }
 nimiq-network-interface = { workspace = true }
@@ -37,4 +37,4 @@ nimiq-utils = { workspace = true, features = ["futures", "spawn", "tagged-signin
 url = "2.5.8"
 
 [dev-dependencies]
-tokio = { version = "1.49", features = ["macros"] }
+tokio = { version = "1.52", features = ["macros"] }

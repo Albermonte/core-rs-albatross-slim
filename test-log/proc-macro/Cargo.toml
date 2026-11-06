@@ -1,8 +1,10 @@
 [package]
 name = "nimiq-test-log-proc-macro"
+publish = false
 version.workspace = true
 authors = ["Daniel Mueller <deso@posteo.net>"]
 edition.workspace = true
+rust-version.workspace = true
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
 include = ["src/lib.rs", "LICENSE-*", "README.md", "CHANGELOG.md"]
@@ -14,11 +16,11 @@ workspace = true
 proc-macro = true
 
 [dependencies]
-darling = "0.23"
+darling = "0.24"
 quote = "1.0"
-syn = { version = "2.0", features = ["full"] }
+syn = { version = "3.0", features = ["full"] }
 
 [dev-dependencies]
-tokio = { version = "1.49", features = ["macros", "rt"] }
+tokio = { version = "1.52", features = ["macros", "rt"] }
 
 nimiq-test-log = { workspace = true }

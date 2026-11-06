@@ -6,7 +6,7 @@ use nimiq_primitives::{
 };
 use nimiq_serde::{Deserialize, Serialize, SerializedMaxSize};
 
-use crate::{MacroBlock, MultiSignature};
+use crate::{multisig::checked_signer_slots, MacroBlock, MultiSignature};
 
 /// The proof for a block produced by Tendermint.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize)]
@@ -18,11 +18,6 @@ pub struct TendermintProof {
 }
 
 impl TendermintProof {
-    /// This simply returns the number of slots that voted (precommitted) to this block.
-    pub fn votes(&self) -> u16 {
-        self.sig.signers.len() as u16
-    }
-
     /// Verifies the proof. This only checks that the proof is valid for this block, not that the
     /// block itself is valid.
     pub fn verify(block: &MacroBlock, current_validators: &Validators) -> bool {
@@ -35,8 +30,16 @@ impl TendermintProof {
             Some(x) => x,
         };
 
+        let signer_slots = match checked_signer_slots(&justification.sig.signers) {
+            Some(slots) => slots,
+            None => {
+                error!("Invalid justification - signer set contains out-of-range slots!");
+                return false;
+            }
+        };
+
         // Check if there are enough votes.
-        if justification.votes() < Policy::TWO_F_PLUS_ONE {
+        if signer_slots.len() < Policy::TWO_F_PLUS_ONE as usize {
             error!("Invalid justification - not enough votes!");
             return false;
         }
@@ -59,9 +62,15 @@ impl TendermintProof {
         // (if they are part of the Multisignature Bitset).
         let mut agg_pk = AggregatePublicKey::new();
 
-        for (i, pk) in current_validators.voting_keys().iter().enumerate() {
-            if justification.sig.signers.contains(i) {
+        for slot in signer_slots {
+            if let Some(pk) = current_validators
+                .get_validator_by_slot_number(slot)
+                .voting_key
+                .uncompress()
+            {
                 agg_pk.aggregate(pk);
+            } else {
+                return false;
             }
         }
 

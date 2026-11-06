@@ -67,33 +67,70 @@ function generate() {
 }
 
 # Prepare build environment
-if ! command -v wasm-bindgen &> /dev/null
-then
-    echo "Installing wasm-bindgen..."
-    cargo install wasm-bindgen-cli
+LOCKED_WASM_BINDGEN_VERSION=$(awk '
+    $0 == "name = \"wasm-bindgen\"" { found = 1; next }
+    found && /^version = / { gsub(/version = "|"/, ""); print; exit }
+' ../Cargo.lock)
+
+if [ -z "$LOCKED_WASM_BINDGEN_VERSION" ]; then
+    echo "Error: could not resolve wasm-bindgen version from ../Cargo.lock" >&2
+    exit 1
+fi
+
+# A repo-local install of the locked wasm-bindgen-cli. It lives in the cargo target
+# dir so it is gitignored, never touches a global install, and is cached by the
+# upgrade-dashboard compose setup's target-dir volume.
+WASM_BINDGEN_ROOT="${CARGO_TARGET_DIR:-../target}/wasm-bindgen"
+mkdir -p "$WASM_BINDGEN_ROOT"
+WASM_BINDGEN_ROOT=$(cd "$WASM_BINDGEN_ROOT" && pwd)
+export PATH="$WASM_BINDGEN_ROOT/bin:$PATH"
+
+# Install the locked version unless a matching wasm-bindgen (local or global, e.g.
+# preinstalled by CI) is already on the PATH.
+INSTALLED_WASM_BINDGEN_VERSION=$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')
+if [ "$INSTALLED_WASM_BINDGEN_VERSION" != "$LOCKED_WASM_BINDGEN_VERSION" ]; then
+    echo "Installing wasm-bindgen-cli $LOCKED_WASM_BINDGEN_VERSION (found: ${INSTALLED_WASM_BINDGEN_VERSION:-none})..."
+    cargo install --locked --root "$WASM_BINDGEN_ROOT" "wasm-bindgen-cli@$LOCKED_WASM_BINDGEN_VERSION"
 fi
 if ! command -v wasm-opt &> /dev/null
 then
-    BINARYEN_VERSION=124
+    BINARYEN_VERSION=129
     BINARYEN_FOLDER="binaryen-version_$BINARYEN_VERSION"
 
-    # Test if correct wasm-opt is already downloaded
-    if [ -f "$BINARYEN_FOLDER/wasm-opt" ]; then
-        export PATH="$PATH:$(pwd)/$BINARYEN_FOLDER"
+    # Determine the binaryen release asset for the current platform
+    case "$(uname -s)" in
+        Linux)  BINARYEN_OS="linux" ;;
+        Darwin) BINARYEN_OS="macos" ;;
+        *) echo "Error: no automatic wasm-opt download for OS '$(uname -s)'." >&2
+           echo "Install binaryen $BINARYEN_VERSION manually and put wasm-opt on your PATH." >&2
+           exit 1 ;;
+    esac
+
+    case "$(uname -m)" in
+        x86_64|amd64) BINARYEN_ARCH="x86_64" ;;
+        # binaryen names its arm64 assets "arm64" for macOS but "aarch64" for linux
+        arm64|aarch64) [ "$BINARYEN_OS" = "macos" ] && BINARYEN_ARCH="arm64" || BINARYEN_ARCH="aarch64" ;;
+        *) echo "Error: no automatic wasm-opt download for architecture '$(uname -m)'." >&2
+           echo "Install binaryen $BINARYEN_VERSION manually and put wasm-opt on your PATH." >&2
+           exit 1 ;;
+    esac
+
+    BINARYEN_ASSET="$BINARYEN_FOLDER-$BINARYEN_ARCH-$BINARYEN_OS"
+
+    # Test if wasm-opt is already downloaded
+    if [ -f "$BINARYEN_FOLDER/bin/wasm-opt" ]; then
+        export PATH="$PATH:$(pwd)/$BINARYEN_FOLDER/bin"
     else
-        echo "Downloading wasm-opt $BINARYEN_VERSION..."
+        echo "Downloading wasm-opt $BINARYEN_VERSION ($BINARYEN_ARCH-$BINARYEN_OS)..."
         # Download release from GitHub
-        curl https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VERSION/$BINARYEN_FOLDER-x86_64-linux.tar.gz --location --output binaryen.tar.gz
+        curl "https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VERSION/$BINARYEN_ASSET.tar.gz" --location --output binaryen.tar.gz
         # Extract archive
-        tar -xvzf binaryen.tar.gz
+        tar -xzf binaryen.tar.gz
         # Delete archive
         rm binaryen.tar.gz
-        # Move wasm-opt binary to root of extracted folder and delete everything else
-        mv ./$BINARYEN_FOLDER/bin/wasm-opt ./$BINARYEN_FOLDER/wasm-opt
-        rm -rf ./$BINARYEN_FOLDER/bin
-        rm -rf ./$BINARYEN_FOLDER/include
-        rm -rf ./$BINARYEN_FOLDER/lib
-        export PATH="$PATH:$(pwd)/$BINARYEN_FOLDER"
+        # Keep bin/ and lib/ together: the macOS wasm-opt resolves libbinaryen.dylib via @loader_path/../lib
+        rm -rf "./$BINARYEN_FOLDER/include"
+        export PATH="$PATH:$(pwd)/$BINARYEN_FOLDER/bin"
     fi
 fi
 

@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Mempool task implementation for Nimiq"
 homepage.workspace = true
 repository.workspace = true
@@ -23,7 +24,7 @@ workspace = true
 futures = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
-tokio-metrics = { version = "0.4", optional = true }
+tokio-metrics = { version = "0.5", optional = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 nimiq-blockchain = { workspace = true }
@@ -35,3 +36,18 @@ nimiq-utils = { workspace = true, features = ["time"] }
 
 [features]
 metrics = ["nimiq-mempool/metrics", "tokio-metrics"]
+
+[dev-dependencies]
+nimiq-time = { workspace = true }
+tokio = { version = "1.52", features = ["macros", "rt", "time"] }
+
+nimiq-database = { workspace = true }
+nimiq-genesis-builder = { workspace = true }
+nimiq-hash = { workspace = true }
+nimiq-keys = { workspace = true }
+nimiq-network-mock = { workspace = true }
+nimiq-primitives = { workspace = true, features = ["coin", "networks"] }
+nimiq-test-log = { workspace = true }
+nimiq-test-utils = { workspace = true }
+nimiq-transaction = { workspace = true }
+nimiq-transaction-builder = { workspace = true }

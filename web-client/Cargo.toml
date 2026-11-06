@@ -1,9 +1,11 @@
 [package]
 name = "nimiq-web-client"
+publish = false
 version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Nimiq's Rust-to-WASM web client"
 homepage.workspace = true
 repository.workspace = true
@@ -22,19 +24,21 @@ workspace = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ark-serialize = "0.4"
 futures = { workspace = true }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# We need to enable the `wasm_js` feature of getrandom 0.3 while we still indirectly depend on it
+getrandom_0_3 = { package="getrandom", version = "0.3", features = ["wasm_js"] }
 hex = "0.4"
 idb = "0.6.5"
 js-sys = "0.3"
 log = { workspace = true }
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"
 serde_bytes = "0.11"
+thiserror = "2.0"
 serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
-tokio = { version = "1.49", features = ["sync"] }
+tokio = { version = "1.52", features = ["sync"] }
 tsify = { version = "0.5", default-features = false, features = ["js"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -76,7 +80,6 @@ nimiq-genesis = { workspace = true, default-features = false }
 nimiq-light-blockchain = { workspace = true }
 nimiq-network-interface = { workspace = true }
 nimiq-network-mock = { workspace = true }
-nimiq-zkp-component = { workspace = true, default-features = false }
 
 [features]
 client = []

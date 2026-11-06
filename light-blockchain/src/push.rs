@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use nimiq_block::{Block, ForkProof, MacroHeader, MicroBlock};
+use nimiq_block::{Block, ForkProof, MicroBlock};
 use nimiq_blockchain_interface::{
     AbstractBlockchain, BlockchainEvent, ChainInfo, ChainOrdering, ForkEvent, PushError, PushResult,
 };
@@ -69,7 +69,8 @@ impl LightBlockchain {
         }
 
         // Perform block intrinsic checks.
-        block.verify(this.network_id)?;
+        let max_timestamp = this.now().saturating_add(Policy::TIMESTAMP_MAX_DRIFT);
+        block.verify(this.network_id, max_timestamp)?;
 
         // Verify that the block is a valid immediate successor to its predecessor.
         let predecessor = &prev_info.head;
@@ -113,7 +114,7 @@ impl LightBlockchain {
         }
 
         // Create the chain info for the new block.
-        let chain_info = ChainInfo::from_block(block, &prev_info, None);
+        let chain_info = ChainInfo::from_block(block, &prev_info, None)?;
 
         // More chain ordering.
         let result = match chain_order {
@@ -174,6 +175,7 @@ impl LightBlockchain {
         }
 
         // Update the head of the blockchain.
+        let is_protocol_upgrade = chain_info.head.version() > this.current_version();
         this.head = chain_info.head.clone();
 
         // If the block is a macro block then we also need to update the macro head.
@@ -206,6 +208,14 @@ impl LightBlockchain {
             .ok();
 
         if is_election_block {
+            if is_protocol_upgrade {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        block_hash.clone(),
+                        this.current_version(),
+                    ))
+                    .ok();
+            }
             this.notifier
                 .send(BlockchainEvent::EpochFinalized(block_hash))
                 .ok();
@@ -326,6 +336,23 @@ impl LightBlockchain {
 
         this.head = new_head_info.head.clone();
 
+        // If the new head is a macro block, update the macro-related state as well.
+        let mut is_protocol_upgrade = false;
+        if let Block::Macro(ref macro_block) = new_head_info.head {
+            this.macro_head = macro_block.clone();
+
+            this.chain_store
+                .clear_old_blocks(new_head_info.head.block_number());
+
+            if macro_block.is_election() {
+                is_protocol_upgrade = macro_block.header.version > this.current_version();
+                this.election_head = macro_block.clone();
+                this.current_validators = macro_block.get_validators();
+                // Store the election block header.
+                this.chain_store.put_election(macro_block.header.clone());
+            }
+        }
+
         let mut reverted_blocks = Vec::with_capacity(revert_chain.len());
         for (hash, chain_info) in revert_chain.into_iter().rev() {
             log::debug!(
@@ -360,6 +387,14 @@ impl LightBlockchain {
             .ok();
 
         if this.head.is_election() {
+            if is_protocol_upgrade {
+                this.notifier
+                    .send(BlockchainEvent::ProtocolUpgrade(
+                        this.head_hash(),
+                        this.current_version(),
+                    ))
+                    .ok();
+            }
             this.notifier
                 .send(BlockchainEvent::EpochFinalized(this.head_hash()))
                 .ok();
@@ -370,42 +405,6 @@ impl LightBlockchain {
         }
 
         Ok(PushResult::Rebranched)
-    }
-
-    /// Pushes an election block backwards into the chain. This pushes the election block immediately
-    /// before the oldest election block that we have. It is useful in case we need to receive a proof
-    /// for a transaction in a past epoch, in that case the simplest course of action is to "walk"
-    /// backwards from our current election block until we get to the desired epoch.
-    pub fn push_election_backwards(
-        this: RwLockUpgradableReadGuard<Self>,
-        header: MacroHeader,
-    ) -> Result<PushResult, PushError> {
-        // Get epoch number.
-        let epoch = Policy::epoch_at(header.block_number);
-
-        // Check if we already know this block.
-        if this.chain_store.get_election(epoch).is_some() {
-            return Ok(PushResult::Known);
-        }
-
-        // Check if we have this block's successor.
-        let prev_block = this
-            .chain_store
-            .get_election(epoch + Policy::blocks_per_epoch())
-            .ok_or(PushError::InvalidSuccessor)?;
-
-        // Verify that the block is indeed the predecessor.
-        if header.hash() != prev_block.parent_election_hash {
-            return Err(PushError::InvalidPredecessor);
-        }
-
-        // Upgrade the blockchain lock
-        let mut this = RwLockUpgradableReadGuard::upgrade(this);
-
-        // Store the election block header.
-        this.chain_store.put_election(header);
-
-        Ok(PushResult::Extended)
     }
 
     fn detect_forks(&self, block: &MicroBlock, validator_address: &Address) {

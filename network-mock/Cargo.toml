@@ -1,9 +1,11 @@
 [package]
 name = "nimiq-network-mock"
+publish = false
 version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Mock network implementation for testing purposes"
 homepage.workspace = true
 repository.workspace = true
@@ -20,14 +22,13 @@ maintenance = { status = "experimental" }
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
 derive_more = { version = "2.1", features = ["display", "from", "into"] }
 futures = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
 serde = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.49", features = [
+tokio = { version = "1.52", features = [
     "rt",
     "sync",
 ] }
