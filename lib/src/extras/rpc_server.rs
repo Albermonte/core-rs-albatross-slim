@@ -36,7 +36,8 @@ pub fn initialize_rpc_server(client: &Client, config: RpcServerConfig) -> Result
         Credentials::new_from_blake2b(credentials.username, credentials.password_hash.0 .0)
     });
 
-    let allowed_methods: HashSet<String> = ALLOWED_METHODS.iter().map(|s| (*s).to_string()).collect();
+    let allowed_methods: HashSet<String> =
+        ALLOWED_METHODS.iter().map(|s| (*s).to_string()).collect();
 
     // A `*` entry allows any origin
     let cors_config = Cors::new()
@@ -46,7 +47,9 @@ pub fn initialize_rpc_server(client: &Client, config: RpcServerConfig) -> Result
     let mut dispatcher = ModularDispatcher::default();
 
     dispatcher.add(BlockchainDispatcher::new(client.blockchain()));
-    dispatcher.add(ConsensusDispatcher::new(client.consensus_proxy().established_flag()));
+    dispatcher.add(ConsensusDispatcher::new(
+        client.consensus_proxy().established_flag(),
+    ));
 
     Ok(Server::new(
         Config {

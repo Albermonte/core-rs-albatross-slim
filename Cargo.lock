@@ -1613,12 +1613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "dtoa"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4690,30 +4684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nimiq-rpc-client"
-version = "2.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "dotenvy",
- "futures-util",
- "nimiq-account",
- "nimiq-bls",
- "nimiq-hash",
- "nimiq-jsonrpc-client",
- "nimiq-jsonrpc-core",
- "nimiq-keys",
- "nimiq-primitives",
- "nimiq-rpc-interface",
- "nimiq-transaction",
- "nimiq-utils",
- "tokio",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "nimiq-rpc-interface"
 version = "2.3.0"
 dependencies = [
@@ -4788,30 +4758,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "nimiq-spammer"
-version = "2.3.0"
-dependencies = [
- "clap",
- "futures-util",
- "nimiq-block",
- "nimiq-blockchain",
- "nimiq-blockchain-interface",
- "nimiq-keys",
- "nimiq-lib",
- "nimiq-mempool",
- "nimiq-primitives",
- "nimiq-transaction",
- "nimiq-transaction-builder",
- "nimiq-utils",
- "rand 0.10.3",
- "serde",
- "tokio",
- "tokio-metrics",
- "toml",
- "tracing",
 ]
 
 [[package]]

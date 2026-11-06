@@ -40,12 +40,10 @@ members = [
   "primitives/subscription",
   "primitives/transaction",
   "primitives/trie",
-  "rpc-client",
   "rpc-interface",
   "rpc-server",
   "serde",
   "serde/derive",
-  "spammer",
   "tendermint",
   "test-log",
   "test-log/proc-macro",
@@ -64,7 +62,9 @@ members = [
 default-members = [
   "client",
 ]
-exclude = ["patches/gloo-timers"]
+# The slim fork drops the RPC methods the `nimiq-rpc` CLI and the validator/mempool/metrics
+# APIs the spammer rely on.
+exclude = ["patches/gloo-timers", "rpc-client", "spammer"]
 
 resolver = "2"
 

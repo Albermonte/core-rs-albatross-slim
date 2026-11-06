@@ -61,7 +61,6 @@ async fn main_inner() -> Result<(), Error> {
     spawn(consensus);
     let consensus = client.consensus_proxy();
 
-
     // Create the "monitor" future which never completes to keep the client alive.
     let mut statistics_interval = config_file.log.statistics;
     let mut show_statistics = true;

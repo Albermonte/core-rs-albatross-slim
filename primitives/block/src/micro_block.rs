@@ -14,9 +14,7 @@ use crate::{
 };
 
 /// The struct representing a Micro block.
-#[derive(
-    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize,
-)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedMaxSize)]
 pub struct MicroBlock {
     /// The header, contains some basic information and commitments to the body and the state.
     pub header: MicroHeader,

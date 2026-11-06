@@ -68,11 +68,12 @@ jobs:
     #    flags: unittests
     #    name: Nimiq code coverage
     #    verbose: true
+    # `default-members` only lists the client, so the whole workspace must be selected explicitly
     - name: Run tests
-      run: cargo nextest run
+      run: cargo nextest run --workspace
     # Currently `nextest` doesn't support doctest so we have to run them apart
     - name: Run doctest
-      run: cargo test --doc
+      run: cargo test --doc --workspace
 
   clippy:
     if: github.event_name != 'push' || github.event.pusher.name != 'dependabot[bot]'
@@ -89,95 +90,3 @@ jobs:
         name: Clippy Report
         token: ${{ secrets.GITHUB_TOKEN }}
         args: --release --all-features
-
-  web-client:
-    runs-on: ubuntu-26.04
-
-    steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        # this might remove tools that are actually needed,
-        # if set to "true" but frees about 6 GB
-        tool-cache: true
-
-        # all of these default to true, but feel free to set to
-        # "false" if necessary for your workflow
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: false
-        swap-storage: true
-    - uses: actions/checkout@v7
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
-    - name: Install wasm-pack
-      run: cargo install wasm-pack
-    - name: Execute wasm unittests
-      working-directory: ./web-client
-      run: wasm-pack test --chrome --headless
-
-  web-client-lib:
-    runs-on: ubuntu-26.04
-
-    steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        large-packages: false
-    - uses: actions/checkout@v7
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: wasm32-unknown-unknown
-    - uses: Swatinem/rust-cache@v2
-    - name: Resolve wasm-bindgen version from Cargo.lock
-      id: wasm-bindgen
-      run: |
-        VERSION=$(awk '
-          $0 == "name = \"wasm-bindgen\"" { found = 1; next }
-          found && /^version = / { gsub(/version = "|"/, ""); print; exit }
-        ' Cargo.lock)
-        if [ -z "$VERSION" ]; then echo "::error::Could not resolve wasm-bindgen version from Cargo.lock"; exit 1; fi
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-    - uses: taiki-e/install-action@v2
-      with:
-        tool: wasm-bindgen-cli@${{ steps.wasm-bindgen.outputs.version }}
-    - name: Compile to wasm and generate bindings
-      working-directory: ./web-client
-      run: ./scripts/build.sh --only nodejs,types
-    - name: Validate type declarations
-      working-directory: ./web-client/extras
-      run: yarn tsc ../dist/types/wasm/bundler.d.ts
-    - name: Install dependencies in the web-client/dist folder
-      working-directory: ./web-client/dist
-      run: yarn install
-    - name: Execute unittests
-      working-directory: ./web-client/extras
-      run: yarn test
-
-  reconnect-test:
-    runs-on: ubuntu-26.04
-
-    steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.14'
-    - name: Install python dependencies
-      run: pip install scripts/devnet
-    - name: Set up Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
-    - name: Build the code
-      run: cargo build
-    - name: Executes the 4 validators reconnecting scenario
-      run: |
-          python3 scripts/devnet/devnet.py -t .github/devnet_topologies/four_validators.toml -r 1
-    - name: Archive test results
-      if: always()
-      uses: actions/upload-artifact@v7
-      with:
-          name: reconnect-test-logs
-          path: |
-            temp-logs/

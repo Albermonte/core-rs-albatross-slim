@@ -41,9 +41,7 @@ pub fn compress(raw: &[u8]) -> Vec<u8> {
 /// databases that were written without compression.
 pub fn decompress(bytes: &[u8]) -> Cow<'_, [u8]> {
     if bytes.first() == Some(&MAGIC_COMPRESSED) {
-        Cow::Owned(
-            zstd::decode_all(std::io::Cursor::new(&bytes[1..])).expect("zstd decompress"),
-        )
+        Cow::Owned(zstd::decode_all(std::io::Cursor::new(&bytes[1..])).expect("zstd decompress"))
     } else {
         Cow::Borrowed(bytes)
     }
